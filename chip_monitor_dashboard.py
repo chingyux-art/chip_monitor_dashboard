@@ -21,9 +21,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 避免長時間抓資料時前端連線超時（某些環境會需要）
-st.set_option('server.httpTimeout', 300)
-
 # CSS
 st.markdown("""
 <style>
