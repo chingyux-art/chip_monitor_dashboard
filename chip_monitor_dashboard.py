@@ -21,6 +21,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# 避免長時間抓資料時前端連線超時（某些環境會需要）
+st.set_option('server.httpTimeout', 300)
+
 # CSS
 st.markdown("""
 <style>
@@ -124,43 +127,52 @@ def find_col(cols, keywords):
 # 5) 精準最近 N 個「有交易」開市日：用 T86 回傳是否有 data 判斷
 # =========================
 @st.cache_data(ttl=3600)
-def get_last_n_twse_open_days(n=10, max_lookback=60):
+def get_last_n_twse_open_days(n=10, max_lookback=45):
     """
-    精準抓最近 n 個「實際有交易」TWSE 開市日（用 T86 回傳 data/stat 判斷）
-    max_lookback: 最多往回找幾天避免無窮迴圈（遇到長假可調大）
+    精準抓最近 n 個實際有交易的開市日：
+    - 逐日呼叫 TWSE T86
+    - 只要回傳 data 非空且 stat=OK，視為開市日
+    - 先跳過週末，減少無效請求
     """
     session = create_session_with_retries()
 
+    def fetch_t86_json(date_str: str):
+        # 改用 rwd/zh 版（常見可用範例）[3](https://github.com/TsengYuanChe/python_stock/blob/main/TWSE.py)[4](https://github.com/arleigh418/python-and-Taiwan-stock-market/issues/76)
+        url = (
+            "https://www.twse.com.tw/rwd/zh/fund/T86"
+            f"?date={date_str}&selectType=ALLBUT0999&response=json"
+        )
+        r = session.get(url, timeout=(3, 8))  # (connect, read)
+        r.raise_for_status()
+        return r.json()
+
     open_days = []
     d = datetime.now().date()
-
     looked = 0
+
     while len(open_days) < n and looked < max_lookback:
+        # 先跳過週末，避免白打
+        if d.weekday() >= 5:
+            d -= timedelta(days=1)
+            looked += 1
+            continue
+
         date_str = d.strftime("%Y%m%d")
-        # T86 with date + selectType + response=json（可用範例）[1](https://github.com/arleigh418/python-and-Taiwan-stock-market/issues/76)
-        url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
         try:
-            r = session.get(url, timeout=10)
-            if r.status_code == 200:
-                js = r.json()
-                has_data = bool(js.get("data"))
-                stat_ok = str(js.get("stat", "")).upper() == "OK"
-                # 有 data 或 OK 都視為開市日（不同時期回傳格式可能略異）
-                if has_data or stat_ok:
-                    # 但仍以 data 存在為更可靠
-                    if has_data:
-                        open_days.append(d)
+            js = fetch_t86_json(date_str)
+            # T86 典型回傳包含 stat/fields/data [5](https://www.twse.com.tw/fund/T86)
+            if str(js.get("stat", "")).upper() == "OK" and js.get("data"):
+                open_days.append(d)
         except Exception:
             pass
 
         d -= timedelta(days=1)
         looked += 1
-        time.sleep(0.05)  # 溫和避免連打
+        time.sleep(0.03)  # 稍微降速，避免被限流
 
     open_days = sorted(open_days)
-    if len(open_days) == 0:
+    if not open_days:
         return [], None, None
-
     return open_days, open_days[0], open_days[-1]
 
 # =========================
@@ -341,31 +353,26 @@ def get_kline_data(stock_code, start, end):
 # =========================
 # 9) 主流程：先算最近 10 開市日，再載入資料
 # =========================
-open_days, start_date, end_date = get_last_n_twse_open_days(n=10, max_lookback=80)
+# 先顯示基本 UI，避免一進來就是空白等待
+status_box = st.empty()
+
+with st.spinner("正在取得最近 10 個 TWSE 開市日..."):
+    open_days, start_date, end_date = get_last_n_twse_open_days(n=10, max_lookback=45)
 
 if not open_days:
-    st.error("⚠️ 無法取得最近開市日（TWSE 來源可能暫時不可用）。請稍後再試或切換到模擬數據。")
+    status_box.error("⚠️ 無法取得最近開市日（TWSE 可能暫時無回應）。請切換到模擬數據或稍後再試。")
     data_source = "模擬數據 (測試用)"
-    # 退而求其次：用最近 10 個工作日當日期
-    approx_days = [datetime.now().date() - timedelta(days=i) for i in range(0, 14)]
-    approx_days = [d for d in approx_days if d.weekday() < 5][:10]
-    approx_days = sorted(approx_days)
-    open_days = approx_days
+    # 退而求其次：用最近10個平日（非精準）
+    approx = []
+    d = datetime.now().date()
+    while len(approx) < 10:
+        if d.weekday() < 5:
+            approx.append(d)
+        d -= timedelta(days=1)
+    open_days = sorted(approx)
     start_date, end_date = open_days[0], open_days[-1]
-
-st.info(f"📊 數據源: {data_source}｜分析區間：最近 10 個開市日（{start_date} ～ {end_date}）")
-
-if data_source == "真實數據 (TWSE)":
-    st.warning("⚠️ 正在從 TWSE 獲取真實數據（最近10個開市日）…")
-    with st.spinner("正在加載數據..."):
-        t86_raw = fetch_t86_for_dates(open_days)
-        institutional_df = normalize_t86_to_app_schema(t86_raw)
-
-        if institutional_df.empty:
-            st.warning("⚠️ 無法獲取真實數據，自動切換到模擬數據")
-            institutional_df = generate_institutional_data(open_days, STOCKS_LIST)
 else:
-    institutional_df = generate_institutional_data(open_days, STOCKS_LIST)
+    status_box.success(f"✅ 已取得最近10個開市日：{start_date} ～ {end_date}")
 
 # 添加總買超列
 institutional_df["總買超"] = (
