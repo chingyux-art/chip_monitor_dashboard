@@ -126,14 +126,42 @@ def get_finmind_loader():
 
 
 def normalize_finmind_institutional(raw_df, stock_code, stock_name):
-    """
-    把 FinMind 回傳的法人資料轉成你儀表板需要的 schema：
-    日期、股票代碼、股票名稱、外資買超、內資買超、 自營商買超
-
-    注意：FinMind 不同版本/資料集欄位命名可能不同，所以這裡做「多候選欄位」容錯。
-    """
-    if raw_df is None or len(raw_df) == 0:
+    if raw_df is None or raw_df.empty:
         return pd.DataFrame()
+
+    df = raw_df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+
+    def col(candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    foreign = col([
+        "Foreign_Investor_Buy_Sell",
+        "Foreign_Investor_Buy_Sell_Balance"
+    ])
+    trust = col([
+        "Investment_Trust_Buy_Sell",
+        "Investment_Trust_Buy_Sell_Balance"
+    ])
+    dealer = col([
+        "Dealer_Buy_Sell",
+        "Dealer_buy_sell",
+        "Dealer_Buy_Sell_Balance"
+    ])
+
+    out = pd.DataFrame({
+        "日期": df["date"],
+        "股票代碼": stock_code,
+        "股票名稱": stock_name,
+        "外資買超": df[foreign] if foreign else 0,
+        "內資買超": df[trust] if trust else 0,
+        "自營商買超": df[dealer] if dealer else 0,
+    })
+
+    return out
 
     cols = list(raw_df.columns)
 
