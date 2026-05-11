@@ -339,7 +339,19 @@ with tab2:
         st.plotly_chart(fig, use_container_width=True)
     
     st.subheader("評分 vs 連買天數")
-    fig = px.scatter(top_20, x='連買天數', y='評分', size='總買超', hover_name='股票名稱', color='評分', color_continuous_scale='RdYlGn', title="評分 vs 連買天數分析")
+    top_20_plot = top_20.copy()
+    top_20_plot['BubbleSize'] = top_20_plot['總買超'].abs()
+    fig = px.scatter(
+        top_20_plot,
+        x='連買天數',
+        y='評分',
+        size='BubbleSize',
+        hover_name='股票名稱',
+        color='評分',
+        color_continuous_scale='RdYlGn',
+        title="評分 vs 連買天數分析",
+        size_max=40
+    )
     fig.update_layout(height=500, hovermode='closest')
     st.plotly_chart(fig, use_container_width=True)
 
