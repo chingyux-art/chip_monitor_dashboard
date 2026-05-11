@@ -163,33 +163,34 @@ def generate_institutional_data(start, end, stocks_list):
     return pd.DataFrame(data)
 
 # 計算連買天數
-def calculate_consecutive_buying_days(df):
-    """計算連續買超天數"""
-    consecutive_days = []
-    
-    for stock in df['股票代碼'].unique():
-        stock_data = df[df['股票代碼'] == stock].sort_values('日期')
-        stock_data_copy = stock_data.copy()
-        stock_data_copy['總買超'] = stock_data_copy['外資買超'] + stock_data_copy['內資買超'] + stock_data_copy['自營商買超']
-        
-        consecutive = 0
-        max_consecutive = 0
-        
-        for value in stock_data_copy['總買超']:
-            if value > 0:
-                consecutive += 1
-                max_consecutive = max(max_consecutive, consecutive)
+def calculate_buy_streaks(df):
+    out = []
+    for code in df['股票代碼'].unique():
+        s = df[df['股票代碼'] == code].sort_values('日期').copy()
+        s['總買超'] = s['外資買超'] + s['內資買超'] + s['自營商買超']
+
+        # max streak
+        consec = 0
+        max_streak = 0
+        for v in s['總買超']:
+            if v > 0:
+                consec += 1
+                max_streak = max(max_streak, consec)
             else:
-                consecutive = 0
-        
-        stock_name = stock_data['股票名稱'].iloc[0] if '股票名稱' in stock_data.columns else stock
-        consecutive_days.append({
-            '股票代碼': stock,
-            '股票名稱': stock_name,
-            '連買天數': max_consecutive
-        })
-    
-    return pd.DataFrame(consecutive_days)
+                consec = 0
+
+        # current streak (from latest backwards)
+        current_streak = 0
+        for v in reversed(s['總買超'].tolist()):
+            if v > 0:
+                current_streak += 1
+            else:
+                break
+
+        name = s['股票名稱'].iloc[0] if '股票名稱' in s.columns else code
+        out.append({'股票代碼': code, '股票名稱': name,
+                    '最大連買天數': max_streak, '最新連買天數': current_streak})
+    return pd.DataFrame(out)
 
 # 計算綜合評分
 def calculate_score(row):
