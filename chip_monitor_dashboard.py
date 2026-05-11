@@ -124,7 +124,6 @@ def get_finmind_loader():
         dl = DataLoader()
     return dl
 
-
 def normalize_finmind_institutional(raw_df, stock_code, stock_name):
     if raw_df is None or raw_df.empty:
         return pd.DataFrame()
@@ -132,33 +131,31 @@ def normalize_finmind_institutional(raw_df, stock_code, stock_name):
     df = raw_df.copy()
     df["date"] = pd.to_datetime(df["date"])
 
-    def col(candidates):
-        for c in candidates:
-            if c in df.columns:
-                return c
-        return None
+    def get(col_name):
+        return df[col_name] if col_name in df.columns else 0
 
-    foreign = col([
-        "Foreign_Investor_Buy_Sell",
-        "Foreign_Investor_Buy_Sell_Balance"
-    ])
-    trust = col([
-        "Investment_Trust_Buy_Sell",
-        "Investment_Trust_Buy_Sell_Balance"
-    ])
-    dealer = col([
-        "Dealer_Buy_Sell",
-        "Dealer_buy_sell",
-        "Dealer_Buy_Sell_Balance"
-    ])
+    # ✅ 外資
+    foreign_buy = get("Foreign_Investor_Buy")
+    foreign_sell = get("Foreign_Investor_Sell")
+    foreign_net = foreign_buy - foreign_sell
+
+    # ✅ 投信
+    trust_buy = get("Investment_Trust_Buy")
+    trust_sell = get("Investment_Trust_Sell")
+    trust_net = trust_buy - trust_sell
+
+    # ✅ 自營商（分兩種就加起來）
+    dealer_buy = get("Dealer_Buy") + get("Dealer_Hedging_Buy")
+    dealer_sell = get("Dealer_Sell") + get("Dealer_Hedging_Sell")
+    dealer_net = dealer_buy - dealer_sell
 
     out = pd.DataFrame({
         "日期": df["date"],
         "股票代碼": stock_code,
         "股票名稱": stock_name,
-        "外資買超": df[foreign] if foreign else 0,
-        "內資買超": df[trust] if trust else 0,
-        "自營商買超": df[dealer] if dealer else 0,
+        "外資買超": foreign_net.astype(int),
+        "內資買超": trust_net.astype(int),
+        "自營商買超": dealer_net.astype(int),
     })
 
     return out
