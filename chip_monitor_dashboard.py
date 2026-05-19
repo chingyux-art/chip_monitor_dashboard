@@ -317,7 +317,7 @@ def calculate_score(row):
     score = 50
     score += (row["外資買超"] / 10) * 0.3
     score += (row["內資買超"] / 10) * 0.2
-    score += (row["自營商買���"] / 10) * 0.2
+    score += (row["自營商買超"] / 10) * 0.2
     score += (row["連買天數"] / 5) * 0.3
     return max(0, min(100, score))
 
