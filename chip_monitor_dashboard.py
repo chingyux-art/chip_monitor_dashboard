@@ -125,30 +125,77 @@ def get_finmind_loader():
     return dl
 
 def normalize_finmind_institutional(raw_df, stock_code, stock_name):
+    """
+    標準化 FinMind 法人資料
+    支持多種欄位命名方式
+    """
     if raw_df is None or raw_df.empty:
         return pd.DataFrame()
 
     df = raw_df.copy()
-    df["date"] = pd.to_datetime(df["date"])
+   # 確保 date 欄位存在並轉換為 datetime
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+    else:
+        return pd.DataFrame()
 
     def get(col_name):
-        return df[col_name] if col_name in df.columns else 0
+        """安全地獲取欄位值，如果不存在則返回 0"""
+        if col_name in df.columns:
+            return df[col_name]
+        return pd.Series([0] * len(df))
+    # ✅ 方法 1: 嘗試直接使用標準欄位名稱
+    if all(col in df.columns for col in ["Foreign_Investor_Buy", "Foreign_Investor_Sell", 
+                                           "Investment_Trust_Buy", "Investment_Trust_Sell",
+                                           "Dealer_Buy", "Dealer_Sell"]):
+        foreign_buy = df["Foreign_Investor_Buy"]
+        foreign_sell = df["Foreign_Investor_Sell"]
+        foreign_net = foreign_buy - foreign_sell
 
-    # ✅ 外資
-    foreign_buy = get("Foreign_Investor_Buy")
-    foreign_sell = get("Foreign_Investor_Sell")
-    foreign_net = foreign_buy - foreign_sell
+        trust_buy = df["Investment_Trust_Buy"]
+        trust_sell = df["Investment_Trust_Sell"]
+        trust_net = trust_buy - trust_sell
 
-    # ✅ 投信
-    trust_buy = get("Investment_Trust_Buy")
-    trust_sell = get("Investment_Trust_Sell")
-    trust_net = trust_buy - trust_sell
+        dealer_buy = df["Dealer_Buy"] + df.get("Dealer_Hedging_Buy", pd.Series([0] * len(df)))
+        dealer_sell = df["Dealer_Sell"] + df.get("Dealer_Hedging_Sell", pd.Series([0] * len(df)))
+        dealer_net = dealer_buy - dealer_sell
+    else:
+        # ✅ 方法 2: 使用 find_col 尋找欄位（更靈活）
+        cols = list(df.columns)
+        
+        foreign_net_col = find_col(cols, ["foreign net", "Foreign_Investor_Buy_Sell", "foreign"])
+        trust_net_col = find_col(cols, ["trust net", "Investment_Trust_Buy_Sell", "trust"])
+        dealer_net_col = find_col(cols, ["dealer net", "Dealer_Buy_Sell", "dealer"])
+        
+        foreign_buy_col = find_col(cols, ["foreign buy", "foreign_investor_buy"])
+        foreign_sell_col = find_col(cols, ["foreign sell", "foreign_investor_sell"])
+        trust_buy_col = find_col(cols, ["trust buy", "investment_trust_buy"])
+        trust_sell_col = find_col(cols, ["trust sell", "investment_trust_sell"])
+        dealer_buy_col = find_col(cols, ["dealer buy", "dealer_buy"])
+        dealer_sell_col = find_col(cols, ["dealer sell", "dealer_sell"])
 
-    # ✅ 自營商（分兩種就加起來）
-    dealer_buy = get("Dealer_Buy") + get("Dealer_Hedging_Buy")
-    dealer_sell = get("Dealer_Sell") + get("Dealer_Hedging_Sell")
-    dealer_net = dealer_buy - dealer_sell
-
+        # 優先使用 net 欄位，否則用 buy - sell
+        if foreign_net_col:
+            foreign_net = df[foreign_net_col].apply(to_int)
+        elif foreign_buy_col and foreign_sell_col:
+            foreign_net = df[foreign_buy_col].apply(to_int) - df[foreign_sell_col].apply(to_int)
+        else:
+            foreign_net = pd.Series([0] * len(df))
+            
+        if trust_net_col:
+            trust_net = df[trust_net_col].apply(to_int)
+        elif trust_buy_col and trust_sell_col:
+            trust_net = df[trust_buy_col].apply(to_int) - df[trust_sell_col].apply(to_int)
+        else:
+            trust_net = pd.Series([0] * len(df))
+            
+        if dealer_net_col:
+            dealer_net = df[dealer_net_col].apply(to_int)
+        elif dealer_buy_col and dealer_sell_col:
+            dealer_net = df[dealer_buy_col].apply(to_int) - df[dealer_sell_col].apply(to_int)
+        else:
+            dealer_net = pd.Series([0] * len(df))
+    
     out = pd.DataFrame({
         "日期": df["date"],
         "股票代碼": stock_code,
@@ -160,65 +207,6 @@ def normalize_finmind_institutional(raw_df, stock_code, stock_name):
 
     return out
 
-    cols = list(raw_df.columns)
-
-    # date & stock_id
-    date_col = find_col(cols, ["date"])
-    stock_id_col = find_col(cols, ["stock_id", "stockid", "stock"])
-    if date_col is None:
-        # 若找不到 date，就不處理
-        return pd.DataFrame()
-
-    df = raw_df.copy()
-    df[date_col] = pd.to_datetime(df[date_col])
-
-    # 外資、投信、自營商 欄位候選（先找 net，再找 buy/sell 來算）
-    # 這些關鍵字做成「包含匹配」，可涵蓋多數命名差異
-    foreign_net = find_col(cols, ["foreign", "外資", "foreign_investor", "foreign investor", "foreign net", "foreign_buy_sell", "foreign_buy-sell", "Foreign_Investor_Buy_Sell"])
-    trust_net = find_col(cols, ["trust", "投信", "investment trust", "institutional_trust", "trust net", "trust_buy_sell", "Investment_Trust_Buy_Sell"])
-    dealer_net = find_col(cols, ["dealer", "自營商", "dealer net", "dealer_buy_sell", "Dealer_Buy_Sell", "dealer_total"])
-
-    # 若欄位其實是 buy/sell，嘗試推導 net
-    def compute_net(net_col_guess, buy_keys, sell_keys):
-        if net_col_guess is not None and net_col_guess in df.columns:
-            # 若看起來像 net 欄位，直接轉數字
-            return df[net_col_guess].apply(to_int)
-
-        buy_col = find_col(cols, buy_keys)
-        sell_col = find_col(cols, sell_keys)
-        if buy_col is not None and sell_col is not None:
-            return df[buy_col].apply(to_int) - df[sell_col].apply(to_int)
-
-        # 找不到就回 0
-        return pd.Series([0] * len(df))
-
-    foreign_series = compute_net(
-        foreign_net,
-        buy_keys=["foreign buy", "外資買進", "foreign_investor_buy", "foreign_buy"],
-        sell_keys=["foreign sell", "外資賣出", "foreign_investor_sell", "foreign_sell"]
-    )
-    trust_series = compute_net(
-        trust_net,
-        buy_keys=["trust buy", "投信買進", "investment_trust_buy", "trust_buy"],
-        sell_keys=["trust sell", "投信賣出", "investment_trust_sell", "trust_sell"]
-    )
-    dealer_series = compute_net(
-        dealer_net,
-        buy_keys=["dealer buy", "自營商買進", "dealer_buy"],
-        sell_keys=["dealer sell", "自營商賣出", "dealer_sell"]
-    )
-
-    out = pd.DataFrame({
-        "日期": df[date_col],
-        "股票代碼": stock_code,
-        "股票名稱": stock_name,
-        "外資買超": foreign_series.astype(int),
-        "內資買超": trust_series.astype(int),      # 你原本「內資」概念最常見就是投信 
-        "自營商買超": dealer_series.astype(int),
-    })
-
-    return out
-
 
 @st.cache_data(ttl=3600)
 def finmind_fetch_institutional(stock_code, stock_name, start_date, end_date):
@@ -226,14 +214,18 @@ def finmind_fetch_institutional(stock_code, stock_name, start_date, end_date):
     用 FinMind 取得單一股票在區間內的法人資料。
     iT 邦幫忙示例顯示可用 DataLoader.taiwan_stock_institutional_investors(...) 取資料。
     """
-    dl = get_finmind_loader()
-    # FinMind 常用接口：taiwan_stock_institutional_investors
-    raw = dl.taiwan_stock_institutional_investors(
-        stock_id=stock_code,
-        start_date=start_date.strftime("%Y-%m-%d"),
-        end_date=end_date.strftime("%Y-%m-%d")
-    )
-    return normalize_finmind_institutional(raw, stock_code, stock_name)
+    try:
+        dl = get_finmind_loader()
+        # FinMind 常用接口：taiwan_stock_institutional_investors
+        raw = dl.taiwan_stock_institutional_investors(
+            stock_id=stock_code,
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d")
+        )
+        return normalize_finmind_institutional(raw, stock_code, stock_name)
+    except Exception as e:
+        st.warning(f"⚠️ 無法取得 {stock_code} 的數據：{str(e)}")
+        return pd.DataFrame()
 
 
 def get_last_n_trading_days_from_finmind(n=10, probe_stock="2330", lookback_days=90):
@@ -325,7 +317,7 @@ def calculate_score(row):
     score = 50
     score += (row["外資買超"] / 10) * 0.3
     score += (row["內資買超"] / 10) * 0.2
-    score += (row["自營商買超"] / 10) * 0.2
+    score += (row["自營商買���"] / 10) * 0.2
     score += (row["連買天數"] / 5) * 0.3
     return max(0, min(100, score))
 
