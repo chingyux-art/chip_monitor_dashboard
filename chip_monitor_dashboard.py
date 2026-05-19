@@ -34,7 +34,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 台股籌碼監控儀表板 v2.0（FinMind 版）")
+st.title("📊 台股籌碼監控儀表板 v2.1（FinMind 版）")
 st.markdown("---")
 
 
@@ -257,6 +257,17 @@ def get_last_n_trading_days_from_finmind(n=10, probe_stock="2330", lookback_days
 
 
 @st.cache_data(ttl=3600)
+def load_industry_data():
+    """加載產業分類 CSV 資料"""
+    try:
+        df = pd.read_csv("台股產業概念股完整分類_含詳細說明.csv", encoding="utf-8-sig")
+        return df
+    except Exception as e:
+        st.warning(f"⚠️ 無法加載產業分類資料：{e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
 def generate_institutional_data(open_days, stocks_list):
     np.random.seed(42)
     dates = pd.to_datetime(open_days)
@@ -445,21 +456,43 @@ if summary_df.empty:
 # =========================
 # Tabs
 # =========================
-tab1, tab2, tab3, tab4 = st.tabs(["法人籌碼", "熱門股票", "K線分析", "詳細資料"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["法人籌碼", "熱門股票", "K線分析", "詳細資料", "產業分類"])
 
 # ---- Tab 1: 法人籌碼 ----
 with tab1:
     st.header("📈 法人籌碼分析")
+    
+    # 新增產業篩選
+    industry_df = load_industry_data()
+    if not industry_df.empty:
+        unique_industries = sorted(industry_df["產業分類"].unique())
+        selected_industry = st.selectbox(
+            "🏭 選擇產業分類（選擇後只顯示該產業個股）",
+            options=["全部"] + unique_industries,
+            key="tab1_industry"
+        )
+        
+        # 根據選擇篩選股票
+        if selected_industry != "全部":
+            industry_stocks = industry_df[industry_df["產業分類"] == selected_industry]["個股代碼名稱"].tolist()
+            # 提取股票代碼（格式為 "代碼 (名稱)"）
+            stock_codes = [code.split()[0] for code in industry_stocks if code]
+            display_df = summary_df[summary_df["股票代碼"].isin(stock_codes)].copy()
+            st.info(f"🏭 已篩選產業：**{selected_industry}** - 共 {len(display_df)} 檔個股")
+        else:
+            display_df = summary_df.copy()
+    else:
+        display_df = summary_df.copy()
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        avg_foreign = summary_df["外資買超"].mean()
+        avg_foreign = display_df["外資買超"].mean()
         st.metric("平均外資買超", f"{avg_foreign:.0f}")
     with col2:
-        avg_domestic = summary_df["內資買超"].mean()
+        avg_domestic = display_df["內資買超"].mean()
         st.metric("平均內資買超(投信)", f"{avg_domestic:.0f}")
     with col3:
-        avg_dealer = summary_df["自營商買超"].mean()
+        avg_dealer = display_df["自營商買超"].mean()
         st.metric("平均自營商買超", f"{avg_dealer:.0f}")
 
     st.markdown("---")
@@ -467,26 +500,28 @@ with tab1:
 
     with col1:
         fig = go.Figure(data=[
-            go.Bar(x=summary_df["股票名稱"], y=summary_df["外資買超"], name="外資"),
-            go.Bar(x=summary_df["股票名稱"], y=summary_df["內資買超"], name="內資(投信)"),
-            go.Bar(x=summary_df["股票名稱"], y=summary_df["自營商買超"], name="自營商"),
+            go.Bar(x=display_df["股票名稱"], y=display_df["外資買超"], name="外資"),
+            go.Bar(x=display_df["股票名稱"], y=display_df["內資買超"], name="內資(投信)"),
+            go.Bar(x=display_df["股票名稱"], y=display_df["自營商買超"], name="自營商"),
         ])
         fig.update_layout(title="各法人買賣超對比", barmode="group", height=400, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        if len(consecutive_buying_df) > 0:
-            top_consecutive = consecutive_buying_df.nlargest(10, "連買天數")
+        # 只顯示篩選後的連買天數 Top 10
+        filtered_consecutive = consecutive_buying_df[consecutive_buying_df["股票代碼"].isin(display_df["股票代碼"])]
+        if len(filtered_consecutive) > 0:
+            top_consecutive = filtered_consecutive.nlargest(10, "連買天數")
             fig = px.bar(top_consecutive, x="股票名稱", y="連買天數", color="連買天數",
                          title="連買天數 Top 10", color_continuous_scale="Viridis")
             fig.update_layout(height=400, hovermode="x")
             st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("最新法人籌碼數據")
-    display_df = summary_df[["股票代碼", "股票名稱", "外資買超", "內資買超", "自營商買超", "總買超"]].copy()
+    display_show = display_df[["股票代碼", "股票名稱", "外資買超", "內資買超", "自營商買超", "總買超"]].copy()
     for c in ["外資買超", "內資買超", "自營商買超", "總買超"]:
-        display_df[c] = display_df[c].apply(lambda x: f"{int(x):+d}")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+        display_show[c] = display_show[c].apply(lambda x: f"{int(x):+d}")
+    st.dataframe(display_show, use_container_width=True, hide_index=True)
 
 
 # ---- Tab 2: 熱門股票 ----
@@ -644,11 +679,90 @@ with tab4:
         fig.update_layout(title="法人買賣超分布", height=400)
         st.plotly_chart(fig, use_container_width=True)
 
+
+# ---- Tab 5: 產業分類 ----
+with tab5:
+    st.header("🏭 台股產業概念股完整分類")
+    
+    industry_df = load_industry_data()
+    
+    if not industry_df.empty:
+        # 顯示所有產業分類
+        unique_industries = sorted(industry_df["產業分類"].unique())
+        
+        st.subheader("📌 選擇產業分類")
+        selected_category = st.selectbox(
+            "請選擇要查看的產業",
+            options=unique_industries,
+            key="tab5_industry"
+        )
+        
+        # 篩選該產業的所有個股
+        category_df = industry_df[industry_df["產業分類"] == selected_category].copy()
+        
+        st.markdown(f"### {selected_category}")
+        st.info(f"共有 **{len(category_df)}** 檔個股在此產業分類")
+        
+        # 顯示該產業的詳細資訊
+        if len(category_df) > 0:
+            # 準備顯示用的資料
+            display_cols = ["序號", "個股代碼名稱", "產業定位", "公司業務說明", "在該產業的地位與優勢"]
+            available_cols = [col for col in display_cols if col in category_df.columns]
+            
+            display_table = category_df[available_cols].copy()
+            
+            # 使用表格顯示
+            st.dataframe(display_table, use_container_width=True, hide_index=True)
+            
+            # 提取股票代碼，展示該產業在籌碼監控中的表現
+            st.markdown("---")
+            st.subheader(f"📊 {selected_category} 籌碼表現")
+            
+            # 提取股票代碼（格式為 "代碼 (名稱)"）
+            stock_codes = []
+            for code_name in category_df["個股代碼名稱"].tolist():
+                if pd.notna(code_name):
+                    code = str(code_name).split()[0]
+                    stock_codes.append(code)
+            
+            # 在籌碼監控資料中篩選該產業的個股
+            industry_performance = summary_df[summary_df["股票代碼"].isin(stock_codes)].copy()
+            
+            if len(industry_performance) > 0:
+                # 按評分排序
+                industry_performance = industry_performance.sort_values("評分", ascending=False)
+                
+                # 顯示該產業的籌碼排名
+                st.subheader("該產業在籌碼監控中的排名")
+                perf_display = industry_performance[["股票代碼", "股票名稱", "外資買超", "內資買超", "自營商買超", "總買超", "連買天數", "評分"]].copy()
+                
+                for c in ["外資買超", "內資買超", "自營商買超", "總買超"]:
+                    perf_display[c] = perf_display[c].apply(lambda x: f"{int(x):+d}")
+                perf_display["評分"] = perf_display["評分"].apply(lambda x: f"{x:.1f}")
+                
+                st.dataframe(perf_display, use_container_width=True, hide_index=True)
+                
+                # 統計資訊
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("監控中的個股數", len(industry_performance))
+                with col2:
+                    st.metric("平均評分", f"{industry_performance['評分'].mean():.1f}")
+                with col3:
+                    st.metric("買超個股數", len(industry_performance[industry_performance["總買超"] > 0]))
+                with col4:
+                    st.metric("最高評分", f"{industry_performance['評分'].max():.1f}")
+            else:
+                st.info(f"ℹ️ 該產業個股目前未納入籌碼監控清單中")
+    else:
+        st.warning("⚠️ 無法加載產業分類資料")
+
+
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.markdown("### 📊 關於此應用\n- **數據源**: FinMind（三大法人買賣資料）\n- **K線數據**: Yahoo Finance\n- **區間**: 最近 10 個交易日")  # [1](https://ithelp.ithome.com.tw/articles/10341946)
+    st.markdown("### 📊 關於此應用\n- **數據源**: FinMind（三大法人買賣資料）\n- **K線數據**: Yahoo Finance\n- **區間**: 最近 10 個交易日")  # [1](https://ithelp.ithome.[...]
 
 with col2:
     st.markdown("### 🎯 評分說明\n- **外資**: 30%\n- **內資(投信)**: 20%\n- **自營商**: 20%\n- **連買天數**: 30%")
@@ -659,7 +773,7 @@ with col3:
 st.markdown(
     f"""
     <div style='text-align: center; color: #888; font-size: 12px;'>
-        最後更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | v2.0 | FinMind Data
+        最後更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | v2.1 | FinMind Data
     </div>
     """,
     unsafe_allow_html=True
