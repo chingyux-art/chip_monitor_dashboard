@@ -448,7 +448,7 @@ if summary_df.empty:
 # =========================
 # Tabs
 # =========================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["法人籌碼", "熱門股票", "K線分析", "詳細資料", "產業分類"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["法人籌碼", "詳細資料", "產業分類"])
 
 # ---- Tab 1: 法人籌碼 ----
 with tab1:
@@ -515,105 +515,7 @@ with tab1:
         display_show[c] = display_show[c].apply(lambda x: f"{int(x):+d}")
     st.dataframe(display_show, use_container_width=True, hide_index=True)
 
-
-# ---- Tab 2: 熱門股票 ----
-with tab2:
-    st.header("🔥 熱門股票排行")
-
-    top_20 = summary_df.nlargest(20, "評分").reset_index(drop=True)
-    top_20["排名"] = range(1, len(top_20) + 1)
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("評分排行榜 Top 20")
-        display_top20 = top_20[["排名", "股票代碼", "股票名稱", "評分", "連買天數", "總買超"]].copy()
-        display_top20["評分"] = display_top20["評分"].apply(lambda x: f"{x:.1f}")
-        display_top20["總買超"] = display_top20["總買超"].apply(lambda x: f"{int(x):+d}")
-        st.dataframe(display_top20, use_container_width=True, hide_index=True)
-
-    with col2:
-        st.subheader("評分分布")
-        fig = go.Figure()
-        fig.add_trace(go.Histogram(x=top_20["評分"], nbinsx=15, marker_color="rgb(55, 83, 109)", opacity=0.7))
-        fig.update_layout(title="評分分布", xaxis_title="評分 (0-100)", yaxis_title="股票數量", height=400, showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("評分 vs 連買天數")
-    top_20_plot = top_20.copy()
-    top_20_plot["BubbleSize"] = top_20_plot["總買超"].abs()
-    fig = px.scatter(
-        top_20_plot,
-        x="連買天數",
-        y="評分",
-        size="BubbleSize",
-        hover_name="股票名稱",
-        color="評分",
-        color_continuous_scale="RdYlGn",
-        title="評分 vs 連買天數分析",
-        size_max=40
-    )
-    fig.update_layout(height=500, hovermode="closest")
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# ---- Tab 3: K線分析 ----
-with tab3:
-    st.header("📈 K線分析")
-
-    default_choice = []
-    if not summary_df.empty:
-        default_choice = [f"{summary_df.iloc[0]['股票代碼']} {summary_df.iloc[0]['股票名稱']}"]
-
-    selected_stocks = st.multiselect(
-        "選擇股票",
-        options=[f"{row['股票代碼']} {row['股票名稱']}" for _, row in summary_df.iterrows()],
-        default=default_choice,
-        max_selections=3
-    )
-
-    if selected_stocks:
-        for selected in selected_stocks:
-            stock_code_display = selected.split()[0]
-            stock_name = selected.split()[1]
-            st.subheader(f"{stock_name} ({stock_code_display})")
-
-            kline_data = get_kline_data(stock_code_display, start_date, end_date + timedelta(days=1))
-            if kline_data is not None and len(kline_data) > 0:
-                fig = go.Figure(data=[go.Candlestick(
-                    x=kline_data.index,
-                    open=kline_data["Open"],
-                    high=kline_data["High"],
-                    low=kline_data["Low"],
-                    close=kline_data["Close"],
-                    name=stock_name
-                )])
-                fig.update_layout(title=f"{stock_name} K線圖", yaxis_title="股價 (TWD)", xaxis_title="日期",
-                                  template="plotly_white", height=500, hovermode="x unified")
-                st.plotly_chart(fig, use_container_width=True)
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("最高價", f"${kline_data['High'].max():.2f}")
-                with col2:
-                    st.metric("最低價", f"${kline_data['Low'].min():.2f}")
-                with col3:
-                    st.metric("收盤價", f"${kline_data['Close'].iloc[-1]:.2f}")
-                with col4:
-                    try:
-                        change = ((kline_data["Close"].iloc[-1] - kline_data["Open"].iloc[0]) / kline_data["Open"].iloc[0]) * 100
-                        st.metric("漲跌幅", f"{change:.2f}%")
-                    except Exception:
-                        st.metric("漲跌幅", "N/A")
-            else:
-                st.warning(f"⚠️ 無法取得 {stock_name} 的K線資料")
-
-            st.markdown("---")
-    else:
-        st.info("👈 請選擇要分析的股票")
-
-
-# ---- Tab 4: 詳細資料 ----
+# ---- Tab 2: 詳細資料 ----
 with tab4:
     st.header("📋 詳細資料")
 
@@ -672,7 +574,7 @@ with tab4:
         st.plotly_chart(fig, use_container_width=True)
 
 
-# ---- Tab 5: 產業分類 ----
+# ---- Tab 3: 產業分類 ----
 with tab5:
     st.header("🏭 台股產業概念股完整分類")
     
