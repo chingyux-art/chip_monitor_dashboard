@@ -448,7 +448,7 @@ if summary_df.empty:
 # =========================
 # Tabs
 # =========================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["法人籌碼", "詳細資料", "產業分類"])
+tab1, tab2, tab3 = st.tabs(["法人籌碼", "詳細資料", "產業分類"])
 
 # ---- Tab 1: 法人籌碼 ----
 with tab1:
@@ -516,7 +516,7 @@ with tab1:
     st.dataframe(display_show, use_container_width=True, hide_index=True)
 
 # ---- Tab 2: 詳細資料 ----
-with tab4:
+with tab2:
     st.header("📋 詳細資料")
 
     st.subheader("完整數據表")
@@ -575,7 +575,7 @@ with tab4:
 
 
 # ---- Tab 3: 產業分類 ----
-with tab5:
+with tab3:
     st.header("🏭 台股產業概念股完整分類")
     
     industry_df = load_industry_data()
