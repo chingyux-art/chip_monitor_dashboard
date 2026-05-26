@@ -28,20 +28,26 @@ def load_group_csv(path: str, mtime: float) -> pd.DataFrame:
 
 
 def ensure_group_columns(df: pd.DataFrame) -> pd.DataFrame:
-    rename_map = {}
-    for c in df.columns:
-        lc = str(c).lower()
-        if "產業" in c or "族群" in c:
-            rename_map[c] = "族群"
-        elif "代碼" in c and "名稱" in c:
-            rename_map[c] = "個股代碼名稱"
-        elif "介紹" in c or "說明" in c:
-            rename_map[c] = "介紹"
-    df = df.rename(columns=rename_map)
-    for col in ["族群", "個股代碼名稱", "介紹"]:
-        if col not in df.columns:
-            df[col] = ""
-    return df
+    normalized = pd.DataFrame(index=df.index)
+
+    def pick_col(candidates):
+        matched = [c for c in df.columns if any(k in str(c) for k in candidates)]
+        if not matched:
+            return pd.Series([""] * len(df), index=df.index)
+        if len(matched) == 1:
+            return df[matched[0]].fillna("")
+
+        # 多欄位命中時，取每列第一個非空值，避免重複欄名造成 DataFrame/Series 混淆
+        subset = df[matched].copy()
+        subset = subset.replace({np.nan: ""})
+        subset = subset.astype(str)
+        return subset.apply(lambda r: next((v for v in r if str(v).strip()), ""), axis=1)
+
+    normalized["族群"] = pick_col(["產業", "族群"])
+    normalized["個股代碼名稱"] = pick_col(["代碼名稱", "個股代碼", "股票代碼", "ticker"])
+    normalized["介紹"] = pick_col(["介紹", "說明", "定位", "優勢"])
+
+    return normalized
 
 
 @st.cache_data(ttl=900)
