@@ -1,9 +1,10 @@
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
@@ -21,10 +22,17 @@ def _parse_stock_code(text: str) -> str:
     return m.group(0) if m else ""
 
 
+def _parse_stock_name(text: str) -> str:
+    if pd.isna(text):
+        return ""
+    t = str(text).strip()
+    m = re.match(r"([^\d\(\)\s]+)", t)
+    return m.group(1) if m else t
+
+
 @st.cache_data(ttl=5)
 def load_group_csv(path: str, mtime: float) -> pd.DataFrame:
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    return df
+    return pd.read_csv(path, encoding="utf-8-sig")
 
 
 def ensure_group_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -36,17 +44,14 @@ def ensure_group_columns(df: pd.DataFrame) -> pd.DataFrame:
             return pd.Series([""] * len(df), index=df.index)
         if len(matched) == 1:
             return df[matched[0]].fillna("")
-
-        # 多欄位命中時，取每列第一個非空值，避免重複欄名造成 DataFrame/Series 混淆
-        subset = df[matched].copy()
-        subset = subset.replace({np.nan: ""})
-        subset = subset.astype(str)
+        subset = df[matched].copy().replace({np.nan: ""}).astype(str)
         return subset.apply(lambda r: next((v for v in r if str(v).strip()), ""), axis=1)
 
-    normalized["族群"] = pick_col(["產業", "族群"])
+    normalized["族群"] = pick_col(["產業分類", "產業", "族群"])
     normalized["個股代碼名稱"] = pick_col(["代碼名稱", "個股代碼", "股票代碼", "ticker"])
-    normalized["介紹"] = pick_col(["介紹", "說明", "定位", "優勢"])
-
+    normalized["產業定位"] = pick_col(["產業定位", "定位"])
+    normalized["公司業務說明"] = pick_col(["公司業務說明", "業務", "說明", "介紹"])
+    normalized["在該產業的地位與優勢"] = pick_col(["在該產業的地位與優勢", "地位", "優勢"])
     return normalized
 
 
@@ -55,114 +60,12 @@ def fetch_ohlcv(stock_code: str, period: str = "6mo") -> pd.DataFrame:
     for suffix in [".TW", ".TWO"]:
         try:
             data = yf.download(f"{stock_code}{suffix}", period=period, interval="1d", progress=False, auto_adjust=False)
-            if data is not None and len(data) > 25:
+            if data is not None and len(data) > 1:
                 data.columns = [c[0] if isinstance(c, tuple) else c for c in data.columns]
                 return data.dropna()
         except Exception:
-            pass
+            continue
     return pd.DataFrame()
-
-
-def tech_score(stock_code: str) -> dict:
-    df = fetch_ohlcv(stock_code)
-    base = {"代碼": stock_code, "名稱": stock_code, "分數": 0.0, "細項": []}
-    if df.empty:
-        return base
-
-    close = df["Close"].astype(float)
-    vol = df["Volume"].astype(float)
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-
-    if len(macd) >= 2 and macd.iloc[-2] < 0 <= macd.iloc[-1]:
-        base["分數"] += 2
-        base["細項"].append("MACD 由負翻正 +2")
-    if macd.iloc[-1] > signal.iloc[-1]:
-        base["分數"] += 1
-        base["細項"].append("MACD 快線>慢線 +1")
-
-    short_bias = (close / close.rolling(5).mean() - 1) * 100
-    long_bias = (close / close.rolling(20).mean() - 1) * 100
-    if len(short_bias.dropna()) > 0 and short_bias.iloc[-1] > long_bias.iloc[-1]:
-        base["分數"] += 2
-        base["細項"].append("短期乖離率>長期乖離率 +2")
-
-    ma5 = close.rolling(5).mean().iloc[-1]
-    ma10 = close.rolling(10).mean().iloc[-1]
-    ma20 = close.rolling(20).mean().iloc[-1]
-    price = close.iloc[-1]
-    if price > ma5:
-        base["分數"] += 1
-    if price > ma10:
-        base["分數"] += 1
-    if price > ma20:
-        base["分數"] += 1
-    if ma5 > ma10 > ma20:
-        base["分數"] += 1
-
-    if len(vol) >= 4 and vol.iloc[-1] > vol.iloc[-4:-1].mean() * 2:
-        base["分數"] += 1
-    if vol.iloc[-1] > 500_000:
-        base["分數"] += 1
-
-    return base
-
-
-@st.cache_data(ttl=3600)
-def fetch_financial_score(stock_code: str) -> dict:
-    out = {"代碼": stock_code, "名稱": stock_code, "分數": 0.0, "細項": []}
-    t = None
-    for suffix in [".TW", ".TWO"]:
-        try:
-            t = yf.Ticker(f"{stock_code}{suffix}")
-            _ = t.info
-            break
-        except Exception:
-            t = None
-    if t is None:
-        return out
-
-    qf = t.quarterly_financials
-    if isinstance(qf, pd.DataFrame) and not qf.empty:
-        rev_key = next((k for k in qf.index if "Revenue" in k), None)
-        gp_key = next((k for k in qf.index if "Gross Profit" in k), None)
-        eps_key = next((k for k in qf.index if "Diluted EPS" in k or "Basic EPS" in k), None)
-
-        if rev_key:
-            rev = qf.loc[rev_key].dropna().astype(float).iloc[::-1]
-            if len(rev) >= 3 and (rev.diff().dropna() > 0).tail(2).all():
-                out["分數"] += 1
-            if len(rev) >= 5:
-                m = (rev.diff().dropna() > 0).tail(4).sum() * 0.2
-                out["分數"] += float(m)
-
-        if gp_key and rev_key:
-            gp = qf.loc[gp_key].astype(float)
-            rev = qf.loc[rev_key].astype(float)
-            gm = (gp / rev.replace(0, np.nan)).dropna().iloc[::-1]
-            if len(gm) >= 5:
-                out["分數"] += float((gm.diff().dropna() > 0).tail(4).sum() * 0.2)
-
-        if eps_key:
-            eps = qf.loc[eps_key].dropna().astype(float).iloc[::-1]
-            if len(eps) >= 2 and eps.iloc[-2] < 0 <= eps.iloc[-1]:
-                out["分數"] += 1
-            if len(eps) >= 3 and (eps.diff().dropna() > 0).tail(2).all():
-                out["分數"] += 1
-
-    qb = t.quarterly_balance_sheet
-    if isinstance(qb, pd.DataFrame) and not qb.empty:
-        k = next((x for x in qb.index if "Contract" in x and "Liab" in x), None)
-        if not k:
-            k = next((x for x in qb.index if "Receiv" in x), None)
-        if k:
-            s = qb.loc[k].dropna().astype(float).iloc[::-1]
-            if len(s) >= 3 and (s.diff().dropna() > 0).tail(2).all():
-                out["分數"] += 1
-
-    return out
 
 
 def latest_price_change(stock_code: str):
@@ -170,8 +73,68 @@ def latest_price_change(stock_code: str):
     if df.empty or len(df) < 2:
         return np.nan, np.nan, np.nan
     c1, c0 = float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
-    pct = (c1 - c0) / c0 * 100
+    pct = (c1 - c0) / c0 * 100 if c0 else np.nan
     return c1, c0, pct
+
+
+def tech_score(stock_code: str) -> dict:
+    df = fetch_ohlcv(stock_code, period="1y")
+    base = {"代碼": stock_code, "分數": 0.0, "細項": []}
+    if df.empty:
+        return base
+    close = df["Close"].astype(float)
+    vol = df["Volume"].astype(float)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+
+    if len(macd) >= 2 and macd.iloc[-2] < signal.iloc[-2] and macd.iloc[-1] > signal.iloc[-1]:
+        base["分數"] += 2
+        base["細項"].append("MACD 黃金交叉 +2")
+    if close.iloc[-1] > close.rolling(20).mean().iloc[-1]:
+        base["分數"] += 1
+        base["細項"].append("站上20日均線 +1")
+    if close.iloc[-1] > close.rolling(60).mean().iloc[-1]:
+        base["分數"] += 1
+        base["細項"].append("站上60日均線 +1")
+    if len(vol) >= 5 and vol.iloc[-1] > vol.iloc[-5:-1].mean() * 1.5:
+        base["分數"] += 1
+        base["細項"].append("量能放大 +1")
+    if len(close) >= 22 and close.iloc[-1] > close.iloc[-22]:
+        base["分數"] += 1
+        base["細項"].append("近一月趨勢向上 +1")
+    return base
+
+
+def fetch_financial_score(stock_code: str) -> dict:
+    out = {"代碼": stock_code, "分數": 0.0, "細項": []}
+    for suffix in [".TW", ".TWO"]:
+        try:
+            t = yf.Ticker(f"{stock_code}{suffix}")
+            info = t.fast_info or {}
+            if info.get("market_cap") and info["market_cap"] > 0:
+                out["分數"] += 1
+                out["細項"].append("市值資料有效 +1")
+
+            qf = t.quarterly_financials
+            if isinstance(qf, pd.DataFrame) and not qf.empty:
+                rev_key = next((k for k in qf.index if "Revenue" in str(k)), None)
+                if rev_key:
+                    rev = qf.loc[rev_key].dropna().astype(float)
+                    if len(rev) >= 2 and rev.iloc[0] > rev.iloc[1]:
+                        out["分數"] += 2
+                        out["細項"].append("最新季營收成長 +2")
+            close = fetch_ohlcv(stock_code, period="6mo")
+            if not close.empty:
+                c = close["Close"].astype(float)
+                if c.iloc[-1] > c.rolling(120, min_periods=20).mean().iloc[-1]:
+                    out["分數"] += 1
+                    out["細項"].append("股價強於半年均值 +1")
+            return out
+        except Exception:
+            continue
+    return out
 
 
 if not CSV_PATH.exists():
@@ -197,29 +160,42 @@ with tab1:
         code = r["代碼"]
         p1, p0, pct = latest_price_change(code) if code else (np.nan, np.nan, np.nan)
         rows.append({
-            "族群": g,
+            "產業分類": g,
             "個股代碼名稱": r["個股代碼名稱"],
-            "介紹": r["介紹"],
+            "產業定位": r["產業定位"],
+            "公司業務說明": r["公司業務說明"],
+            "在該產業的地位與優勢": r["在該產業的地位與優勢"],
             "最新收盤": p1,
             "前一日收盤": p0,
             "漲跌幅(%)": pct,
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.caption("CSV 檔案一旦更新（mtime改變），頁面會在重新執行時自動載入最新內容。")
 
 with tab2:
     g2 = st.selectbox("選擇族群（技術面）", all_groups)
     subset = group_df[group_df["族群"] == g2].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
+    subset["名稱"] = subset["個股代碼名稱"].apply(_parse_stock_name)
+    name_map = dict(zip(subset["代碼"], subset["名稱"]))
     results = []
     with st.spinner("計算技術面評分中..."):
         for code in subset["代碼"].dropna().unique():
             if code:
-                results.append(tech_score(code))
+                s = tech_score(code)
+                s["個股名稱"] = name_map.get(code, code)
+                results.append(s)
     if results:
         out = pd.DataFrame(results).sort_values("分數", ascending=False)
-        out.index = out.index + 1
-        st.dataframe(out[["代碼", "分數", "細項"]], use_container_width=True)
+        out["個股"] = out["個股名稱"] + " (" + out["代碼"] + ")"
+        st.dataframe(out[["個股", "分數", "細項"]], use_container_width=True, hide_index=True)
+
+        chosen = st.selectbox("選擇個股查看近一年K線", out["個股"].tolist())
+        selected_code = re.search(r"\((\d{4,6})\)", chosen).group(1)
+        kdf = fetch_ohlcv(selected_code, period="1y")
+        if not kdf.empty:
+            fig = go.Figure(data=[go.Candlestick(x=kdf.index, open=kdf["Open"], high=kdf["High"], low=kdf["Low"], close=kdf["Close"])])
+            fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"{chosen} 近一年K線")
+            st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("此族群沒有可用股票代碼")
 
@@ -227,15 +203,19 @@ with tab3:
     g3 = st.selectbox("選擇族群（基本面）", all_groups)
     subset = group_df[group_df["族群"] == g3].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
+    subset["名稱"] = subset["個股代碼名稱"].apply(_parse_stock_name)
+    name_map = dict(zip(subset["代碼"], subset["名稱"]))
     results = []
     with st.spinner("計算基本面評分中..."):
         for code in subset["代碼"].dropna().unique():
             if code:
-                results.append(fetch_financial_score(code))
+                s = fetch_financial_score(code)
+                s["個股名稱"] = name_map.get(code, code)
+                results.append(s)
     if results:
         out = pd.DataFrame(results).sort_values("分數", ascending=False)
-        out.index = out.index + 1
-        st.dataframe(out[["代碼", "分數", "細項"]], use_container_width=True)
+        out["個股"] = out["個股名稱"] + " (" + out["代碼"] + ")"
+        st.dataframe(out[["個股", "分數", "細項"]], use_container_width=True, hide_index=True)
     else:
         st.info("此族群沒有可用股票代碼")
 
