@@ -10,7 +10,7 @@ import yfinance as yf
 st.set_page_config(page_title="台股族群監控", page_icon="📊", layout="wide")
 st.title("📊 台股族群監控 App")
 
-CSV_PATH = Path("groups.csv")
+CSV_PATH = Path("Group.csv")
 
 
 def _parse_stock_code(text: str) -> str:
@@ -169,11 +169,7 @@ def latest_price_change(stock_code: str):
 
 
 if not CSV_PATH.exists():
-    st.warning("找不到 groups.csv，請先放入檔案。已提供上傳功能。")
-    upload = st.file_uploader("上傳族群 CSV", type=["csv"])
-    if upload:
-        CSV_PATH.write_bytes(upload.getvalue())
-        st.success("已上傳 groups.csv，請重新整理。")
+    st.error("找不到 Group.csv，請確認檔案位於專案根目錄 chingyux-art/chip_monitor_dashboard/Group.csv。")
     st.stop()
 
 raw_df = load_group_csv(str(CSV_PATH), CSV_PATH.stat().st_mtime)
