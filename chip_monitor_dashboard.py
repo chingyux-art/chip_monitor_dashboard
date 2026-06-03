@@ -1,5 +1,7 @@
+import html
+import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -7,11 +9,29 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+from FinMind.data import DataLoader
 
-st.set_page_config(page_title="台股族群監控", page_icon="📊", layout="wide")
-st.title("📊 台股族群監控 App")
+st.set_page_config(page_title="🐿️", page_icon="🐿️", layout="wide")
+st.title("🐿️")
 
 CSV_PATH = Path("Group.csv")
+
+
+CARD_CSS = """
+<style>
+.stock-card-title {font-size: 1.05rem; font-weight: 800; margin-bottom: 0.15rem;}
+.stock-card-subtitle {color: #6b7280; font-size: 0.82rem; margin-bottom: 0.75rem;}
+.metric-row {margin: 0.55rem 0 0.7rem;}
+.metric-label {display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.78rem; color: #374151;}
+.metric-value {font-weight: 700; white-space: nowrap;}
+.metric-track {height: 0.55rem; background: #e5e7eb; border-radius: 999px; overflow: hidden; margin-top: 0.25rem;}
+.metric-fill {height: 100%; border-radius: 999px; min-width: 0.25rem;}
+.metric-fill.up {background: linear-gradient(90deg, #fca5a5, #dc2626);}
+.metric-fill.down {background: linear-gradient(90deg, #86efac, #16a34a);}
+.metric-fill.neutral {background: linear-gradient(90deg, #cbd5e1, #64748b);}
+.metric-note {font-size: 0.72rem; color: #6b7280; margin-top: 0.15rem;}
+</style>
+"""
 
 
 def _parse_stock_code(text: str) -> str:
@@ -68,6 +88,30 @@ def fetch_ohlcv(stock_code: str, period: str = "6mo") -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def finmind_token() -> str:
+    token = os.environ.get("FINMIND_API_TOKEN", "")
+    try:
+        return st.secrets.get("FINMIND_API_TOKEN", token)
+    except Exception:
+        return token
+
+
+def create_finmind_loader() -> DataLoader:
+    return DataLoader(token=finmind_token())
+
+
+@st.cache_data(ttl=1800)
+def fetch_finmind_financial_statement(stock_code: str) -> pd.DataFrame:
+    try:
+        api = create_finmind_loader()
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+        data = api.taiwan_stock_financial_statement(stock_id=stock_code, start_date=start_date, end_date=end_date)
+        return data if isinstance(data, pd.DataFrame) else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
 def latest_price_change(stock_code: str):
     df = fetch_ohlcv(stock_code, period="1mo")
     if df.empty or len(df) < 2:
@@ -75,6 +119,293 @@ def latest_price_change(stock_code: str):
     c1, c0 = float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
     pct = (c1 - c0) / c0 * 100 if c0 else np.nan
     return c1, c0, pct
+
+
+def _safe_pct(new_value: float, old_value: float) -> float:
+    if pd.isna(new_value) or pd.isna(old_value) or old_value == 0:
+        return np.nan
+    return (new_value - old_value) / old_value * 100
+
+
+def _format_number(value: float, digits: int = 2, suffix: str = "") -> str:
+    if pd.isna(value):
+        return "N/A"
+    return f"{value:,.{digits}f}{suffix}"
+
+
+def _bar_html(label: str, value: float, note: str, positive_base: float = 0.0, max_abs: float = 10.0, unit=None) -> str:
+    if pd.isna(value):
+        css_class = "neutral"
+        width = 8
+        shown = "N/A"
+    else:
+        delta = value - positive_base
+        css_class = "up" if delta >= 0 else "down"
+        width = min(max(abs(delta) / max_abs * 100, 8), 100)
+        shown_unit = unit if unit is not None else ("%" if positive_base == 0 else "x")
+        shown = _format_number(value, 2, shown_unit)
+    return f"""
+    <div class="metric-row">
+      <div class="metric-label"><span>{label}</span><span class="metric-value">{shown}</span></div>
+      <div class="metric-track"><div class="metric-fill {css_class}" style="width:{width:.1f}%"></div></div>
+      <div class="metric-note">{note}</div>
+    </div>
+    """
+
+
+def stock_activity_metrics(stock_code: str) -> dict:
+    df = fetch_ohlcv(stock_code, period="3mo")
+    empty_metrics = {
+        "latest_close": np.nan,
+        "previous_close": np.nan,
+        "daily_pct": np.nan,
+        "avg_5d_pct": np.nan,
+        "cumulative_5d_pct": np.nan,
+        "latest_volume": np.nan,
+        "previous_volume": np.nan,
+        "volume_day_ratio": np.nan,
+        "volume_5d_vs_20d": np.nan,
+        "last_date": "",
+    }
+    if df.empty or len(df) < 2:
+        return empty_metrics
+
+    close = df["Close"].astype(float)
+    volume = df["Volume"].astype(float)
+    daily_return = close.pct_change() * 100
+    latest_close = float(close.iloc[-1])
+    previous_close = float(close.iloc[-2])
+    latest_volume = float(volume.iloc[-1])
+    previous_volume = float(volume.iloc[-2])
+    volume_20d_avg = volume.tail(20).mean() if len(volume) >= 20 else volume.mean()
+    last_index = df.index[-1]
+
+    metrics = empty_metrics.copy()
+    metrics.update({
+        "latest_close": latest_close,
+        "previous_close": previous_close,
+        "daily_pct": _safe_pct(latest_close, previous_close),
+        "avg_5d_pct": float(daily_return.tail(5).mean()) if len(daily_return.dropna()) else np.nan,
+        "cumulative_5d_pct": _safe_pct(latest_close, float(close.iloc[-6])) if len(close) >= 6 else np.nan,
+        "latest_volume": latest_volume,
+        "previous_volume": previous_volume,
+        "volume_day_ratio": latest_volume / previous_volume if previous_volume else np.nan,
+        "volume_5d_vs_20d": volume.tail(5).mean() / volume_20d_avg if volume_20d_avg else np.nan,
+        "last_date": last_index.strftime("%Y-%m-%d") if hasattr(last_index, "strftime") else str(last_index),
+    })
+    return metrics
+
+
+def stock_card_html(stock: dict) -> str:
+    metrics = stock["metrics"]
+    title = html.escape(str(stock["名稱"] or stock["個股代碼名稱"] or stock["代碼"]))
+    subtitle = html.escape(f"{stock['代碼']}｜{stock['產業定位'] or '未填產業定位'}")
+    price_note = (
+        html.escape(f"最新 {_format_number(metrics['latest_close'])} / 前日 {_format_number(metrics['previous_close'])}")
+        if not pd.isna(metrics["latest_close"])
+        else "尚無股價資料"
+    )
+    volume_note = (
+        html.escape(f"最新量 {_format_number(metrics['latest_volume'], 0)} / 前日量 {_format_number(metrics['previous_volume'], 0)}")
+        if not pd.isna(metrics["latest_volume"])
+        else "尚無成交量資料"
+    )
+    return f"""
+    <div class="stock-card-title">{title}</div>
+    <div class="stock-card-subtitle">{subtitle}｜資料日 {metrics['last_date'] or 'N/A'}</div>
+    {_bar_html('最新一日股價漲跌幅', metrics['daily_pct'], price_note, 0, 10)}
+    {_bar_html('近5日平均漲幅', metrics['avg_5d_pct'], '最近5個交易日每日漲跌幅平均', 0, 10)}
+    {_bar_html('近5日累積漲幅', metrics['cumulative_5d_pct'], '最新收盤相對5個交易日前收盤', 0, 20)}
+    {_bar_html('最新一日成交量 / 前一日', metrics['volume_day_ratio'], volume_note, 1, 1.5)}
+    {_bar_html('近5日成交量 / 近20日均量', metrics['volume_5d_vs_20d'], '以近5日均量除以近20日均量', 1, 1.5)}
+    """
+
+
+@st.dialog("個股詳細說明")
+def show_stock_detail(stock: dict):
+    metrics = stock["metrics"]
+    title = stock["名稱"] or stock["個股代碼名稱"] or stock["代碼"]
+    st.subheader(f"{title} ({stock['代碼']})")
+    st.caption(f"族群：{stock['族群']}｜最新資料日：{metrics['last_date'] or 'N/A'}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("最新收盤", _format_number(metrics["latest_close"]), _format_number(metrics["daily_pct"], 2, "%"))
+    c2.metric("近5日平均漲幅", _format_number(metrics["avg_5d_pct"], 2, "%"))
+    c3.metric("量比（近5日/20日）", _format_number(metrics["volume_5d_vs_20d"], 2, "x"))
+    st.markdown("#### 公司與產業說明")
+    st.write(f"**產業定位：** {stock['產業定位'] or '未提供'}")
+    st.write(f"**公司業務說明：** {stock['公司業務說明'] or '未提供'}")
+    st.write(f"**在該產業的地位與優勢：** {stock['在該產業的地位與優勢'] or '未提供'}")
+
+    kdf = fetch_ohlcv(stock["代碼"], period="1y")
+    if not kdf.empty:
+        fig = go.Figure(data=[go.Candlestick(x=kdf.index, open=kdf["Open"], high=kdf["High"], low=kdf["Low"], close=kdf["Close"])])
+        fig.update_layout(height=360, xaxis_rangeslider_visible=False, title=f"{title} 近一年K線")
+        st.plotly_chart(fig, width="stretch")
+
+
+@st.dialog("近一年K線")
+def show_kline_dialog(stock_name: str, stock_code: str):
+    st.subheader(f"{stock_name} ({stock_code})")
+    kdf = fetch_ohlcv(stock_code, period="1y")
+    if kdf.empty:
+        st.info("目前無法取得此個股的K線資料。")
+        return
+    fig = go.Figure(data=[go.Candlestick(x=kdf.index, open=kdf["Open"], high=kdf["High"], low=kdf["Low"], close=kdf["Close"])])
+    fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"{stock_name} 近一年K線")
+    st.plotly_chart(fig, width="stretch")
+
+
+def score_card_html(stock: dict) -> str:
+    title = html.escape(str(stock["個股名稱"] or stock["代碼"]))
+    code = html.escape(str(stock["代碼"]))
+    score = stock.get("分數", np.nan)
+    items = stock.get("細項") or []
+    item_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in items[:4]) or "<li>尚無符合加分條件</li>"
+    return f"""
+    <div class="stock-card-title">{title}</div>
+    <div class="stock-card-subtitle">{code}｜技術面評分</div>
+    {_bar_html('技術面分數', score, '依 MACD、均線、量能與近月趨勢累計', 0, 6, '分')}
+    <ul class="metric-note">{item_html}</ul>
+    """
+
+
+@st.cache_data(ttl=900)
+def fetch_financial_detail(stock_code: str) -> dict:
+    detail = {"source": "無資料", "fast_info": {}, "quarterly_financials": pd.DataFrame(), "finmind_financial_statement": pd.DataFrame()}
+    finmind_df = fetch_finmind_financial_statement(stock_code)
+    if not finmind_df.empty:
+        detail["source"] = "FinMind"
+        detail["finmind_financial_statement"] = finmind_df
+        return detail
+
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = yf.Ticker(f"{stock_code}{suffix}")
+            detail["source"] = "Yahoo Finance"
+            detail["fast_info"] = dict(ticker.fast_info or {})
+            qf = ticker.quarterly_financials
+            if isinstance(qf, pd.DataFrame):
+                detail["quarterly_financials"] = qf
+            return detail
+        except Exception:
+            continue
+    return detail
+
+
+def financial_card_html(stock: dict) -> str:
+    title = html.escape(str(stock["個股名稱"] or stock["代碼"]))
+    code = html.escape(str(stock["代碼"]))
+    score = stock.get("分數", np.nan)
+    items = stock.get("細項") or []
+    item_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in items[:4]) or "<li>尚無符合加分條件</li>"
+    return f"""
+    <div class="stock-card-title">{title}</div>
+    <div class="stock-card-subtitle">{code}｜基本面評分｜資料來源：{html.escape(str(stock.get("資料來源", "未取得")))}</div>
+    {_bar_html('基本面分數', score, '優先依 FinMind 財報，無資料時使用 Yahoo Finance 備援', 0, 4, '分')}
+    <ul class="metric-note">{item_html}</ul>
+    """
+
+
+@st.dialog("基本面詳細資料")
+def show_financial_detail(stock: dict):
+    st.subheader(f"{stock['個股名稱']} ({stock['代碼']})")
+    st.caption(f"基本面分數：{_format_number(stock.get('分數', np.nan), 1, '分')}")
+    st.markdown("#### 評分細項")
+    details = stock.get("細項") or ["尚無符合加分條件"]
+    for item in details:
+        st.write(f"- {item}")
+
+    source_row = stock.get("source_row", {})
+    if source_row:
+        st.markdown("#### 公司與產業說明")
+        st.write(f"**產業定位：** {source_row.get('產業定位') or '未提供'}")
+        st.write(f"**公司業務說明：** {source_row.get('公司業務說明') or '未提供'}")
+        st.write(f"**在該產業的地位與優勢：** {source_row.get('在該產業的地位與優勢') or '未提供'}")
+
+    detail = fetch_financial_detail(stock["代碼"])
+    st.markdown(f"#### 資料來源：{detail.get('source', stock.get('資料來源', '未取得'))}")
+    finmind_df = detail.get("finmind_financial_statement", pd.DataFrame())
+    if isinstance(finmind_df, pd.DataFrame) and not finmind_df.empty:
+        st.markdown("#### FinMind 綜合損益表")
+        st.dataframe(finmind_df.sort_values("date", ascending=False), width="stretch")
+        return
+
+    fast_info = detail.get("fast_info", {})
+    if fast_info:
+        st.markdown("#### Yahoo Finance 快速資訊")
+        cols = st.columns(3)
+        cols[0].metric("市值", _format_number(fast_info.get("market_cap"), 0))
+        cols[1].metric("最近價格", _format_number(fast_info.get("last_price")))
+        cols[2].metric("年初至今最高", _format_number(fast_info.get("year_high")))
+
+    qf = detail.get("quarterly_financials", pd.DataFrame())
+    if isinstance(qf, pd.DataFrame) and not qf.empty:
+        st.markdown("#### Yahoo Finance 季度財務資料")
+        st.dataframe(qf, width="stretch")
+
+
+def chip_card_html(stock: dict) -> str:
+    title = html.escape(str(stock.get("個股", stock.get("代碼", ""))))
+    return f"""
+    <div class="stock-card-title">{title}</div>
+    <div class="stock-card-subtitle">買超單位：張｜紅色買超、綠色賣超</div>
+    {_bar_html('外資 5日買超', stock.get('外資_5日', np.nan), '最近5個交易日合計', 0, 10000, '張')}
+    {_bar_html('外資 10日買超', stock.get('外資_10日', np.nan), '最近10個交易日合計', 0, 20000, '張')}
+    {_bar_html('外資 20日買超', stock.get('外資_20日', np.nan), '最近20個交易日合計', 0, 40000, '張')}
+    {_bar_html('投信 5日買超', stock.get('投信_5日', np.nan), '最近5個交易日合計', 0, 3000, '張')}
+    {_bar_html('投信 10日買超', stock.get('投信_10日', np.nan), '最近10個交易日合計', 0, 6000, '張')}
+    {_bar_html('投信 20日買超', stock.get('投信_20日', np.nan), '最近20個交易日合計', 0, 12000, '張')}
+    {_bar_html('自營商 5日買超', stock.get('自營商_5日', np.nan), '最近5個交易日合計', 0, 3000, '張')}
+    {_bar_html('自營商 10日買超', stock.get('自營商_10日', np.nan), '最近10個交易日合計', 0, 6000, '張')}
+    {_bar_html('自營商 20日買超', stock.get('自營商_20日', np.nan), '最近20個交易日合計', 0, 12000, '張')}
+    """
+
+
+def render_card_grid(cards, html_func, cols_per_row: int, button_label=None, button_key_prefix: str = "card", on_click=None):
+    for start in range(0, len(cards), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col, stock in zip(cols, cards[start:start + cols_per_row]):
+            with col:
+                with st.container(border=True):
+                    st.markdown(html_func(stock), unsafe_allow_html=True)
+                    if button_label and on_click:
+                        if st.button(button_label, key=f"{button_key_prefix}_{stock['代碼']}", width="stretch"):
+                            on_click(stock)
+
+
+def show_tech_score_explanation():
+    with st.expander("技術面評分說明", expanded=True):
+        st.markdown(
+            """
+            **最高 6 分。** 分數越高代表近期技術條件越多同時成立，僅作為排序與觀察輔助。
+
+            | 條件 | 加分 |
+            |---|---:|
+            | MACD 由下往上穿越訊號線（黃金交叉） | +2 |
+            | 最新收盤價站上 20 日均線 | +1 |
+            | 最新收盤價站上 60 日均線 | +1 |
+            | 最新成交量大於前 4 個交易日均量的 1.5 倍 | +1 |
+            | 最新收盤價高於 5 日均線 | +1 |
+            """
+        )
+
+
+def show_financial_score_explanation():
+    with st.expander("基本面評分說明", expanded=True):
+        st.markdown(
+            """
+            **最高 4 分。** 系統會優先使用 FinMind 綜合損益表；若 FinMind 無資料才改用 Yahoo Finance。
+
+            | 資料來源 | 條件 | 加分 |
+            |---|---|---:|
+            | FinMind | 最新季度營收高於前一季營收 | +2 |
+            | FinMind | 最新季度淨利/損益為正 | +1 |
+            | FinMind | 最新季度 EPS / 每股盈餘為正 | +1 |
+            | Yahoo Finance（備援） | 可取得有效市值資料 | +1 |
+            | Yahoo Finance（備援） | 最新季度營收高於前一季營收 | +2 |
+            | Yahoo Finance（備援） | 最新收盤價高於近半年均值（120 日均線，至少 20 筆資料） | +1 |
+            """
+        )
 
 
 def tech_score(stock_code: str) -> dict:
@@ -101,21 +432,64 @@ def tech_score(stock_code: str) -> dict:
     if len(vol) >= 5 and vol.iloc[-1] > vol.iloc[-5:-1].mean() * 1.5:
         base["分數"] += 1
         base["細項"].append("量能放大 +1")
-    if len(close) >= 22 and close.iloc[-1] > close.iloc[-22]:
+    if close.iloc[-1] > close.rolling(5).mean().iloc[-1]:
         base["分數"] += 1
-        base["細項"].append("近一月趨勢向上 +1")
+        base["細項"].append("站上5日均線 +1")
     return base
 
 
+def _latest_finmind_values(df: pd.DataFrame, keywords) -> pd.Series:
+    if df.empty or "type" not in df.columns or "value" not in df.columns:
+        return pd.Series(dtype="float64")
+    pattern = "|".join(re.escape(k) for k in keywords)
+    matched = df[df["type"].astype(str).str.contains(pattern, case=False, na=False)].copy()
+    if matched.empty:
+        return pd.Series(dtype="float64")
+    matched["date"] = pd.to_datetime(matched["date"], errors="coerce")
+    matched["value"] = pd.to_numeric(matched["value"], errors="coerce")
+    return matched.dropna(subset=["date", "value"]).sort_values("date", ascending=False)["value"]
+
+
+def _score_with_finmind(stock_code: str) -> dict:
+    out = {"代碼": stock_code, "分數": 0.0, "細項": [], "資料來源": "FinMind"}
+    finmind_df = fetch_finmind_financial_statement(stock_code)
+    if finmind_df.empty:
+        out["資料來源"] = "FinMind 無資料"
+        return out
+
+    revenue = _latest_finmind_values(finmind_df, ["Revenue", "營業收入", "營收", "收入"])
+    if len(revenue) >= 2 and revenue.iloc[0] > revenue.iloc[1]:
+        out["分數"] += 2
+        out["細項"].append("FinMind：最新季營收成長 +2")
+
+    net_income = _latest_finmind_values(finmind_df, ["NetIncome", "ProfitLoss", "本期淨利", "稅後淨利", "淨利", "損益"])
+    if len(net_income) >= 1 and net_income.iloc[0] > 0:
+        out["分數"] += 1
+        out["細項"].append("FinMind：最新季淨利為正 +1")
+
+    eps = _latest_finmind_values(finmind_df, ["EPS", "每股盈餘"])
+    if len(eps) >= 1 and eps.iloc[0] > 0:
+        out["分數"] += 1
+        out["細項"].append("FinMind：最新季 EPS 為正 +1")
+
+    if not out["細項"]:
+        out["細項"].append("FinMind：已取得財報，但未符合加分條件")
+    return out
+
+
 def fetch_financial_score(stock_code: str) -> dict:
-    out = {"代碼": stock_code, "分數": 0.0, "細項": []}
+    finmind_score = _score_with_finmind(stock_code)
+    if finmind_score["資料來源"] == "FinMind":
+        return finmind_score
+
+    out = {"代碼": stock_code, "分數": 0.0, "細項": [], "資料來源": "Yahoo Finance"}
     for suffix in [".TW", ".TWO"]:
         try:
             t = yf.Ticker(f"{stock_code}{suffix}")
             info = t.fast_info or {}
             if info.get("market_cap") and info["market_cap"] > 0:
                 out["分數"] += 1
-                out["細項"].append("市值資料有效 +1")
+                out["細項"].append("Yahoo Finance：市值資料有效 +1")
 
             qf = t.quarterly_financials
             if isinstance(qf, pd.DataFrame) and not qf.empty:
@@ -124,17 +498,74 @@ def fetch_financial_score(stock_code: str) -> dict:
                     rev = qf.loc[rev_key].dropna().astype(float)
                     if len(rev) >= 2 and rev.iloc[0] > rev.iloc[1]:
                         out["分數"] += 2
-                        out["細項"].append("最新季營收成長 +2")
+                        out["細項"].append("Yahoo Finance：最新季營收成長 +2")
             close = fetch_ohlcv(stock_code, period="6mo")
             if not close.empty:
                 c = close["Close"].astype(float)
                 if c.iloc[-1] > c.rolling(120, min_periods=20).mean().iloc[-1]:
                     out["分數"] += 1
-                    out["細項"].append("股價強於半年均值 +1")
+                    out["細項"].append("Yahoo Finance：股價強於半年均值 +1")
+            if not out["細項"]:
+                out["細項"].append("Yahoo Finance：已取得資料，但未符合加分條件")
             return out
         except Exception:
             continue
-    return out
+    finmind_score["資料來源"] = "未取得"
+    finmind_score["細項"] = ["FinMind 與 Yahoo Finance 皆無法取得基本面資料"]
+    return finmind_score
+
+
+def _institution_bucket(name: str) -> str:
+    text = str(name)
+    if "投信" in text or "Investment_Trust" in text:
+        return "投信"
+    if "自營" in text or "Dealer" in text:
+        return "自營商"
+    if "外資" in text or "Foreign" in text:
+        return "外資"
+    return "其他"
+
+
+@st.cache_data(ttl=1800)
+def fetch_institutional_summary(stock_code: str, end_date: str) -> dict:
+    start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=120)).strftime("%Y-%m-%d")
+    base = {
+        "代碼": stock_code,
+        "外資_5日": np.nan,
+        "外資_10日": np.nan,
+        "外資_20日": np.nan,
+        "投信_5日": np.nan,
+        "投信_10日": np.nan,
+        "投信_20日": np.nan,
+        "自營商_5日": np.nan,
+        "自營商_10日": np.nan,
+        "自營商_20日": np.nan,
+    }
+    try:
+        api = create_finmind_loader()
+        df = api.taiwan_stock_institutional_investors(stock_id=stock_code, start_date=start_date, end_date=end_date)
+    except Exception:
+        return base
+
+    if df is None or df.empty:
+        return base
+
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["bucket"] = df["name"].apply(_institution_bucket)
+    df["net"] = pd.to_numeric(df["buy"], errors="coerce").fillna(0) - pd.to_numeric(df["sell"], errors="coerce").fillna(0)
+    grouped = df[df["bucket"].isin(["外資", "投信", "自營商"])].groupby(["date", "bucket"], as_index=False)["net"].sum()
+    trade_dates = sorted(grouped["date"].unique())
+    if not trade_dates:
+        return base
+
+    for bucket in ["外資", "投信", "自營商"]:
+        bucket_df = grouped[grouped["bucket"] == bucket]
+        for days in [5, 10, 20]:
+            recent_dates = trade_dates[-days:]
+            total_shares = bucket_df[bucket_df["date"].isin(recent_dates)]["net"].sum()
+            base[f"{bucket}_{days}日"] = total_shares / 1000
+    return base
 
 
 if not CSV_PATH.exists():
@@ -149,29 +580,48 @@ if not all_groups:
     st.error("CSV 缺少有效的『族群』資料")
     st.stop()
 
-tab1, tab2, tab3 = st.tabs(["分頁一：族群與股價", "分頁二：技術面評分", "分頁三：基本面評分"])
+tab1, tab2, tab3, tab4 = st.tabs(["分頁一：族群與股價", "分頁二：技術面評分", "分頁三：基本面評分", "分頁四：籌碼統計"])
 
 with tab1:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
     g = st.selectbox("選擇族群", all_groups)
     subset = group_df[group_df["族群"] == g].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
-    rows = []
-    for _, r in subset.iterrows():
-        code = r["代碼"]
-        p1, p0, pct = latest_price_change(code) if code else (np.nan, np.nan, np.nan)
-        rows.append({
-            "產業分類": g,
-            "個股代碼名稱": r["個股代碼名稱"],
-            "產業定位": r["產業定位"],
-            "公司業務說明": r["公司業務說明"],
-            "在該產業的地位與優勢": r["在該產業的地位與優勢"],
-            "最新收盤": p1,
-            "前一日收盤": p0,
-            "漲跌幅(%)": pct,
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    subset["名稱"] = subset["個股代碼名稱"].apply(_parse_stock_name)
+    cards = []
+    with st.spinner("讀取股價與成交量資料中..."):
+        for _, r in subset.iterrows():
+            code = r["代碼"]
+            if not code:
+                continue
+            cards.append({
+                "族群": g,
+                "代碼": code,
+                "名稱": r["名稱"],
+                "個股代碼名稱": r["個股代碼名稱"],
+                "產業定位": r["產業定位"],
+                "公司業務說明": r["公司業務說明"],
+                "在該產業的地位與優勢": r["在該產業的地位與優勢"],
+                "metrics": stock_activity_metrics(code),
+            })
+
+    if cards:
+        cols_per_row = st.slider("每列顯示方框數", min_value=2, max_value=4, value=3)
+        for start in range(0, len(cards), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for col, stock in zip(cols, cards[start:start + cols_per_row]):
+                with col:
+                    with st.container(border=True):
+                        st.markdown(stock_card_html(stock), unsafe_allow_html=True)
+                        if st.button("查看詳細說明", key=f"detail_{stock['代碼']}", width="stretch"):
+                            show_stock_detail(stock)
+    else:
+        st.info("此族群沒有可用股票代碼")
+
 
 with tab2:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
+    show_tech_score_explanation()
     g2 = st.selectbox("選擇族群（技術面）", all_groups)
     subset = group_df[group_df["族群"] == g2].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
@@ -181,41 +631,77 @@ with tab2:
     with st.spinner("計算技術面評分中..."):
         for code in subset["代碼"].dropna().unique():
             if code:
-                s = tech_score(code)
-                s["個股名稱"] = name_map.get(code, code)
-                results.append(s)
+                score = tech_score(code)
+                score["個股名稱"] = name_map.get(code, code)
+                results.append(score)
     if results:
-        out = pd.DataFrame(results).sort_values("分數", ascending=False)
-        out["個股"] = out["個股名稱"] + " (" + out["代碼"] + ")"
-        st.dataframe(out[["個股", "分數", "細項"]], use_container_width=True, hide_index=True)
-
-        chosen = st.selectbox("選擇個股查看近一年K線", out["個股"].tolist())
-        selected_code = re.search(r"\((\d{4,6})\)", chosen).group(1)
-        kdf = fetch_ohlcv(selected_code, period="1y")
-        if not kdf.empty:
-            fig = go.Figure(data=[go.Candlestick(x=kdf.index, open=kdf["Open"], high=kdf["High"], low=kdf["Low"], close=kdf["Close"])])
-            fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"{chosen} 近一年K線")
-            st.plotly_chart(fig, use_container_width=True)
+        cards = pd.DataFrame(results).sort_values("分數", ascending=False).to_dict("records")
+        cols_per_row = st.slider("每列顯示技術面方框數", min_value=2, max_value=4, value=3)
+        render_card_grid(
+            cards,
+            score_card_html,
+            cols_per_row,
+            button_label="顯示K線",
+            button_key_prefix="kline",
+            on_click=lambda stock: show_kline_dialog(stock["個股名稱"], stock["代碼"]),
+        )
     else:
         st.info("此族群沒有可用股票代碼")
 
 with tab3:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
+    show_financial_score_explanation()
     g3 = st.selectbox("選擇族群（基本面）", all_groups)
     subset = group_df[group_df["族群"] == g3].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
     subset["名稱"] = subset["個股代碼名稱"].apply(_parse_stock_name)
     name_map = dict(zip(subset["代碼"], subset["名稱"]))
+    source_map = {row["代碼"]: row.to_dict() for _, row in subset.iterrows()}
     results = []
     with st.spinner("計算基本面評分中..."):
         for code in subset["代碼"].dropna().unique():
             if code:
-                s = fetch_financial_score(code)
-                s["個股名稱"] = name_map.get(code, code)
-                results.append(s)
+                score = fetch_financial_score(code)
+                score["個股名稱"] = name_map.get(code, code)
+                score["source_row"] = source_map.get(code, {})
+                results.append(score)
     if results:
-        out = pd.DataFrame(results).sort_values("分數", ascending=False)
-        out["個股"] = out["個股名稱"] + " (" + out["代碼"] + ")"
-        st.dataframe(out[["個股", "分數", "細項"]], use_container_width=True, hide_index=True)
+        cards = pd.DataFrame(results).sort_values("分數", ascending=False).to_dict("records")
+        cols_per_row = st.slider("每列顯示基本面方框數", min_value=2, max_value=4, value=3)
+        render_card_grid(
+            cards,
+            financial_card_html,
+            cols_per_row,
+            button_label="詳細資訊",
+            button_key_prefix="financial_detail",
+            on_click=show_financial_detail,
+        )
+    else:
+        st.info("此族群沒有可用股票代碼")
+
+with tab4:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
+    st.subheader("籌碼統計：三大法人最近 5 / 10 / 20 日買超")
+    st.caption("買超單位為『張』；正值代表買超，負值代表賣超。資料來源使用 FinMind 三大法人買賣表。")
+    g4 = st.selectbox("選擇族群（籌碼統計）", all_groups)
+    subset = group_df[group_df["族群"] == g4].copy()
+    subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
+    subset["名稱"] = subset["個股代碼名稱"].apply(_parse_stock_name)
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    rows = []
+    with st.spinner("讀取三大法人買賣超資料中..."):
+        for _, r in subset.drop_duplicates("代碼").iterrows():
+            code = r["代碼"]
+            if not code:
+                continue
+            summary = fetch_institutional_summary(code, end_date)
+            summary["個股"] = f"{r['名稱']} ({code})"
+            rows.append(summary)
+
+    if rows:
+        cards = pd.DataFrame(rows).to_dict("records")
+        cols_per_row = st.slider("每列顯示籌碼方框數", min_value=1, max_value=3, value=2)
+        render_card_grid(cards, chip_card_html, cols_per_row)
     else:
         st.info("此族群沒有可用股票代碼")
 
