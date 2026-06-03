@@ -568,6 +568,59 @@ def fetch_institutional_summary(stock_code: str, end_date: str) -> dict:
     return base
 
 
+def _institution_bucket(name: str) -> str:
+    text = str(name)
+    if "投信" in text or "Investment_Trust" in text:
+        return "投信"
+    if "自營" in text or "Dealer" in text:
+        return "自營商"
+    if "外資" in text or "Foreign" in text:
+        return "外資"
+    return "其他"
+
+
+@st.cache_data(ttl=1800)
+def fetch_institutional_summary(stock_code: str, end_date: str) -> dict:
+    start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=120)).strftime("%Y-%m-%d")
+    base = {
+        "代碼": stock_code,
+        "外資_5日": np.nan,
+        "外資_10日": np.nan,
+        "外資_20日": np.nan,
+        "投信_5日": np.nan,
+        "投信_10日": np.nan,
+        "投信_20日": np.nan,
+        "自營商_5日": np.nan,
+        "自營商_10日": np.nan,
+        "自營商_20日": np.nan,
+    }
+    try:
+        api = DataLoader()
+        df = api.taiwan_stock_institutional_investors(stock_id=stock_code, start_date=start_date, end_date=end_date)
+    except Exception:
+        return base
+
+    if df is None or df.empty:
+        return base
+
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["bucket"] = df["name"].apply(_institution_bucket)
+    df["net"] = pd.to_numeric(df["buy"], errors="coerce").fillna(0) - pd.to_numeric(df["sell"], errors="coerce").fillna(0)
+    grouped = df[df["bucket"].isin(["外資", "投信", "自營商"])].groupby(["date", "bucket"], as_index=False)["net"].sum()
+    trade_dates = sorted(grouped["date"].unique())
+    if not trade_dates:
+        return base
+
+    for bucket in ["外資", "投信", "自營商"]:
+        bucket_df = grouped[grouped["bucket"] == bucket]
+        for days in [5, 10, 20]:
+            recent_dates = trade_dates[-days:]
+            total_shares = bucket_df[bucket_df["date"].isin(recent_dates)]["net"].sum()
+            base[f"{bucket}_{days}日"] = total_shares / 1000
+    return base
+
+
 if not CSV_PATH.exists():
     st.error("找不到 Group.csv，請確認檔案位於專案根目錄 chingyux-art/chip_monitor_dashboard/Group.csv。")
     st.stop()
