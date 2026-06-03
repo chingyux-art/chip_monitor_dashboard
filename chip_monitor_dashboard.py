@@ -10,10 +10,23 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from FinMind.data import DataLoader
+import base64
 from pathlib import Path
 
+# 讀取並編碼圖片
 icon_path = Path("icon.jpg")
-st.set_page_config(page_title="Chip Monitor Dashboard", page_icon=str(icon_path), layout="wide")
+if icon_path.exists():
+    with open(icon_path, "rb") as f:
+        icon_data = base64.b64encode(f.read()).decode()
+    icon_url = f"data:image/jpeg;base64,{icon_data}"
+else:
+    icon_url = "🐿️"
+
+st.set_page_config(
+    page_title="Chip Monitor Dashboard",
+    page_icon=icon_url,
+    layout="wide"
+)
 
 CSV_PATH = Path("Group.csv")
 WATCHLIST_PATH = Path("Watchlist.csv")
