@@ -15,6 +15,15 @@ st.set_page_config(page_title="🐿️", page_icon="🐿️", layout="wide")
 st.title("🐿️")
 
 CSV_PATH = Path("Group.csv")
+WATCHLIST_PATH = Path("Watchlist.csv")
+WATCHLIST_GROUP_NAME = "觀察族群"
+WATCHLIST_COLUMNS = [
+    "族群",
+    "個股代碼名稱",
+    "產業定位",
+    "公司業務說明",
+    "在該產業的地位與優勢",
+]
 
 
 CARD_CSS = """
@@ -55,6 +64,11 @@ def load_group_csv(path: str, mtime: float) -> pd.DataFrame:
     return pd.read_csv(path, encoding="utf-8-sig")
 
 
+@st.cache_data(ttl=5)
+def load_watchlist_csv(path: str, mtime: float) -> pd.DataFrame:
+    return pd.read_csv(path, encoding="utf-8-sig")
+
+
 def ensure_group_columns(df: pd.DataFrame) -> pd.DataFrame:
     normalized = pd.DataFrame(index=df.index)
 
@@ -73,6 +87,66 @@ def ensure_group_columns(df: pd.DataFrame) -> pd.DataFrame:
     normalized["公司業務說明"] = pick_col(["公司業務說明", "業務", "說明", "介紹"])
     normalized["在該產業的地位與優勢"] = pick_col(["在該產業的地位與優勢", "地位", "優勢"])
     return normalized
+
+
+def empty_watchlist_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=WATCHLIST_COLUMNS)
+
+
+def normalize_watchlist_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = ensure_group_columns(df).copy()
+    for col in WATCHLIST_COLUMNS:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[WATCHLIST_COLUMNS].copy()
+    out["族群"] = WATCHLIST_GROUP_NAME
+    out = out.fillna("")
+    return out
+
+
+def get_watchlist_df() -> pd.DataFrame:
+    if WATCHLIST_PATH.exists():
+        df = load_watchlist_csv(str(WATCHLIST_PATH), WATCHLIST_PATH.stat().st_mtime)
+    else:
+        df = empty_watchlist_df()
+    return normalize_watchlist_df(df)
+
+
+def save_watchlist_df(df: pd.DataFrame):
+    out = normalize_watchlist_df(df)
+    out.to_csv(WATCHLIST_PATH, index=False, encoding="utf-8-sig")
+
+
+@st.cache_data
+def convert_df_to_csv(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def build_code_name(code: str, name: str) -> str:
+    code = str(code).strip()
+    name = str(name).strip()
+    if code and name:
+        return f"{code} {name}"
+    return code or name
+
+
+def append_watchlist_item(stock_code: str, stock_name: str, industry_pos: str, biz_desc: str, advantage: str):
+    current = get_watchlist_df().copy()
+    new_row = pd.DataFrame([
+        {
+            "族群": WATCHLIST_GROUP_NAME,
+            "個股代碼名稱": build_code_name(stock_code, stock_name),
+            "產業定位": industry_pos.strip(),
+            "公司業務說明": biz_desc.strip(),
+            "在該產業的地位與優勢": advantage.strip(),
+        }
+    ])
+    out = pd.concat([current, new_row], ignore_index=True)
+    out["個股代碼名稱"] = out["個股代碼名稱"].astype(str).str.strip()
+    out = out[out["個股代碼名稱"] != ""].copy()
+    out = out.drop_duplicates(subset=["個股代碼名稱"], keep="last").reset_index(drop=True)
+    save_watchlist_df(out)
+    st.session_state.watchlist_editor_df = out
 
 
 @st.cache_data(ttl=900)
@@ -300,7 +374,7 @@ def financial_card_html(stock: dict) -> str:
     item_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in items[:4]) or "<li>尚無符合加分條件</li>"
     return f"""
     <div class="stock-card-title">{title}</div>
-    <div class="stock-card-subtitle">{code}｜基本面評分｜資料來源：{html.escape(str(stock.get("資料來源", "未取得")))}</div>
+    <div class="stock-card-subtitle">{code}｜基本面評分｜資料來源：{html.escape(str(stock.get('資料來源', '未取得')))}</div>
     {_bar_html('基本面分數', score, '優先依 FinMind 財報，無資料時使用 Yahoo Finance 備援', 0, 4, '分')}
     <ul class="metric-note">{item_html}</ul>
     """
@@ -568,72 +642,28 @@ def fetch_institutional_summary(stock_code: str, end_date: str) -> dict:
     return base
 
 
-def _institution_bucket(name: str) -> str:
-    text = str(name)
-    if "投信" in text or "Investment_Trust" in text:
-        return "投信"
-    if "自營" in text or "Dealer" in text:
-        return "自營商"
-    if "外資" in text or "Foreign" in text:
-        return "外資"
-    return "其他"
-
-
-@st.cache_data(ttl=1800)
-def fetch_institutional_summary(stock_code: str, end_date: str) -> dict:
-    start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=120)).strftime("%Y-%m-%d")
-    base = {
-        "代碼": stock_code,
-        "外資_5日": np.nan,
-        "外資_10日": np.nan,
-        "外資_20日": np.nan,
-        "投信_5日": np.nan,
-        "投信_10日": np.nan,
-        "投信_20日": np.nan,
-        "自營商_5日": np.nan,
-        "自營商_10日": np.nan,
-        "自營商_20日": np.nan,
-    }
-    try:
-        api = DataLoader()
-        df = api.taiwan_stock_institutional_investors(stock_id=stock_code, start_date=start_date, end_date=end_date)
-    except Exception:
-        return base
-
-    if df is None or df.empty:
-        return base
-
-    df = df.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    df["bucket"] = df["name"].apply(_institution_bucket)
-    df["net"] = pd.to_numeric(df["buy"], errors="coerce").fillna(0) - pd.to_numeric(df["sell"], errors="coerce").fillna(0)
-    grouped = df[df["bucket"].isin(["外資", "投信", "自營商"])].groupby(["date", "bucket"], as_index=False)["net"].sum()
-    trade_dates = sorted(grouped["date"].unique())
-    if not trade_dates:
-        return base
-
-    for bucket in ["外資", "投信", "自營商"]:
-        bucket_df = grouped[grouped["bucket"] == bucket]
-        for days in [5, 10, 20]:
-            recent_dates = trade_dates[-days:]
-            total_shares = bucket_df[bucket_df["date"].isin(recent_dates)]["net"].sum()
-            base[f"{bucket}_{days}日"] = total_shares / 1000
-    return base
-
-
 if not CSV_PATH.exists():
     st.error("找不到 Group.csv，請確認檔案位於專案根目錄 chingyux-art/chip_monitor_dashboard/Group.csv。")
     st.stop()
 
 raw_df = load_group_csv(str(CSV_PATH), CSV_PATH.stat().st_mtime)
-group_df = ensure_group_columns(raw_df)
+base_group_df = ensure_group_columns(raw_df)
+watchlist_df = get_watchlist_df()
+group_df = pd.concat([base_group_df, watchlist_df], ignore_index=True)
+group_df = ensure_group_columns(group_df)
 all_groups = sorted([g for g in group_df["族群"].dropna().unique() if str(g).strip()])
 
 if not all_groups:
     st.error("CSV 缺少有效的『族群』資料")
     st.stop()
 
-tab1, tab2, tab3, tab4 = st.tabs(["分頁一：族群與股價", "分頁二：技術面評分", "分頁三：基本面評分", "分頁四：籌碼統計"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "分頁一：族群與股價",
+    "分頁二：技術面評分",
+    "分頁三：基本面評分",
+    "分頁四：籌碼統計",
+    "分頁五：觀察清單管理",
+])
 
 with tab1:
     st.markdown(CARD_CSS, unsafe_allow_html=True)
@@ -670,7 +700,6 @@ with tab1:
                             show_stock_detail(stock)
     else:
         st.info("此族群沒有可用股票代碼")
-
 
 with tab2:
     st.markdown(CARD_CSS, unsafe_allow_html=True)
@@ -757,6 +786,106 @@ with tab4:
         render_card_grid(cards, chip_card_html, cols_per_row)
     else:
         st.info("此族群沒有可用股票代碼")
+
+with tab5:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
+    st.subheader("觀察清單管理")
+    st.caption("可新增、刪除、匯出個人觀察股；儲存後會自動形成『觀察族群』，並帶入前四個分頁。")
+
+    if "watchlist_editor_df" not in st.session_state:
+        st.session_state.watchlist_editor_df = get_watchlist_df()
+
+    st.markdown("### 表單快速新增")
+    with st.form("watchlist_add_form", clear_on_submit=True):
+        f1, f2 = st.columns(2)
+        stock_code = f1.text_input("股票代碼", placeholder="例如 2330")
+        stock_name = f2.text_input("股票名稱", placeholder="例如 台積電")
+
+        industry_pos = st.text_input("產業定位", placeholder="例如 AI 晶圓代工 / 高速運算核心供應商")
+        biz_desc = st.text_area("公司業務說明", placeholder="例如 提供晶圓代工、先進製程與特殊製程服務")
+        advantage = st.text_area("在該產業的地位與優勢", placeholder="例如 全球晶圓代工龍頭，具製程領先與客戶黏著優勢")
+        form_submit = st.form_submit_button("新增到觀察清單", width="stretch")
+
+        if form_submit:
+            code_name = build_code_name(stock_code, stock_name)
+            if not _parse_stock_code(code_name):
+                st.error("請至少輸入有效股票代碼，例如 2330。")
+            else:
+                append_watchlist_item(stock_code, stock_name, industry_pos, biz_desc, advantage)
+                load_watchlist_csv.clear()
+                st.cache_data.clear()
+                st.success(f"已新增 {code_name} 到觀察清單。")
+                st.rerun()
+
+    st.markdown("### 表格編輯區")
+    st.caption("可直接新增列、刪除列或修改內容；刪除後記得按儲存。")
+
+    editor_df = normalize_watchlist_df(st.session_state.watchlist_editor_df)
+
+    edited_df = st.data_editor(
+        editor_df,
+        hide_index=True,
+        num_rows="dynamic",
+        width="stretch",
+        column_config={
+            "族群": st.column_config.TextColumn("族群", disabled=True),
+            "個股代碼名稱": st.column_config.TextColumn(
+                "個股代碼名稱",
+                help="建議格式：2330 台積電"
+            ),
+            "產業定位": st.column_config.TextColumn("產業定位"),
+            "公司業務說明": st.column_config.TextColumn("公司業務說明"),
+            "在該產業的地位與優勢": st.column_config.TextColumn("在該產業的地位與優勢"),
+        },
+        key="watchlist_data_editor",
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        if st.button("儲存觀察清單", key="save_watchlist", width="stretch"):
+            cleaned = normalize_watchlist_df(edited_df)
+            cleaned["個股代碼名稱"] = cleaned["個股代碼名稱"].astype(str).str.strip()
+            cleaned = cleaned[cleaned["個股代碼名稱"] != ""].copy()
+            cleaned = cleaned.drop_duplicates(subset=["個股代碼名稱"], keep="last").reset_index(drop=True)
+
+            save_watchlist_df(cleaned)
+            st.session_state.watchlist_editor_df = cleaned
+
+            load_watchlist_csv.clear()
+            st.cache_data.clear()
+
+            st.success("觀察清單已儲存，前四個分頁可使用『觀察族群』。")
+            st.rerun()
+
+    with c2:
+        if st.button("重新載入觀察清單", key="reload_watchlist", width="stretch"):
+            load_watchlist_csv.clear()
+            st.session_state.watchlist_editor_df = get_watchlist_df()
+            st.info("已重新載入磁碟中的觀察清單。")
+            st.rerun()
+
+    with c3:
+        export_df = normalize_watchlist_df(edited_df)
+        export_df["個股代碼名稱"] = export_df["個股代碼名稱"].astype(str).str.strip()
+        export_df = export_df[export_df["個股代碼名稱"] != ""].reset_index(drop=True)
+
+        st.download_button(
+            label="匯出個人觀察清單 CSV",
+            data=convert_df_to_csv(export_df),
+            file_name=f"個人觀察清單_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+    st.markdown("### 刪除提醒")
+    st.markdown(
+        """
+        - 在表格編輯區直接刪掉某列，即可移除個股。
+        - 刪除後請按「儲存觀察清單」，前四個分頁的「觀察族群」會同步更新。
+        - 若只想單純新增一筆，優先使用上方表單會比較快。
+        """
+    )
 
 st.markdown("---")
 st.caption(f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
