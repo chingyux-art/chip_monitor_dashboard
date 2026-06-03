@@ -11,8 +11,7 @@ import streamlit as st
 import yfinance as yf
 from FinMind.data import DataLoader
 
-st.set_page_config(page_title="🐿️", page_icon="🐿️", layout="wide")
-st.title("🐿️")
+st.set_page_config(page_title="Chip Monitor Dashboard", page_icon="icon.jpg", layout="wide")
 
 CSV_PATH = Path("Group.csv")
 WATCHLIST_PATH = Path("Watchlist.csv")
