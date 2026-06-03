@@ -108,7 +108,7 @@ def _format_number(value: float, digits: int = 2, suffix: str = "") -> str:
     return f"{value:,.{digits}f}{suffix}"
 
 
-def _bar_html(label: str, value: float, note: str, positive_base: float = 0.0, max_abs: float = 10.0) -> str:
+def _bar_html(label: str, value: float, note: str, positive_base: float = 0.0, max_abs: float = 10.0, unit=None) -> str:
     if pd.isna(value):
         css_class = "neutral"
         width = 8
@@ -117,7 +117,8 @@ def _bar_html(label: str, value: float, note: str, positive_base: float = 0.0, m
         delta = value - positive_base
         css_class = "up" if delta >= 0 else "down"
         width = min(max(abs(delta) / max_abs * 100, 8), 100)
-        shown = _format_number(value, 2, "%" if positive_base == 0 else "x")
+        shown_unit = unit if unit is not None else ("%" if positive_base == 0 else "x")
+        shown = _format_number(value, 2, shown_unit)
     return f"""
     <div class="metric-row">
       <div class="metric-label"><span>{label}</span><span class="metric-value">{shown}</span></div>
@@ -215,6 +216,125 @@ def show_stock_detail(stock: dict):
         fig = go.Figure(data=[go.Candlestick(x=kdf.index, open=kdf["Open"], high=kdf["High"], low=kdf["Low"], close=kdf["Close"])])
         fig.update_layout(height=360, xaxis_rangeslider_visible=False, title=f"{title} 近一年K線")
         st.plotly_chart(fig, width="stretch")
+
+
+@st.dialog("近一年K線")
+def show_kline_dialog(stock_name: str, stock_code: str):
+    st.subheader(f"{stock_name} ({stock_code})")
+    kdf = fetch_ohlcv(stock_code, period="1y")
+    if kdf.empty:
+        st.info("目前無法取得此個股的K線資料。")
+        return
+    fig = go.Figure(data=[go.Candlestick(x=kdf.index, open=kdf["Open"], high=kdf["High"], low=kdf["Low"], close=kdf["Close"])])
+    fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"{stock_name} 近一年K線")
+    st.plotly_chart(fig, width="stretch")
+
+
+def score_card_html(stock: dict) -> str:
+    title = html.escape(str(stock["個股名稱"] or stock["代碼"]))
+    code = html.escape(str(stock["代碼"]))
+    score = stock.get("分數", np.nan)
+    items = stock.get("細項") or []
+    item_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in items[:4]) or "<li>尚無符合加分條件</li>"
+    return f"""
+    <div class="stock-card-title">{title}</div>
+    <div class="stock-card-subtitle">{code}｜技術面評分</div>
+    {_bar_html('技術面分數', score, '依 MACD、均線、量能與近月趨勢累計', 0, 6, '分')}
+    <ul class="metric-note">{item_html}</ul>
+    """
+
+
+@st.cache_data(ttl=900)
+def fetch_financial_detail(stock_code: str) -> dict:
+    detail = {"fast_info": {}, "quarterly_financials": pd.DataFrame(), "major_holders": pd.DataFrame()}
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = yf.Ticker(f"{stock_code}{suffix}")
+            detail["fast_info"] = dict(ticker.fast_info or {})
+            qf = ticker.quarterly_financials
+            if isinstance(qf, pd.DataFrame):
+                detail["quarterly_financials"] = qf
+            holders = ticker.major_holders
+            if isinstance(holders, pd.DataFrame):
+                detail["major_holders"] = holders
+            return detail
+        except Exception:
+            continue
+    return detail
+
+
+def financial_card_html(stock: dict) -> str:
+    title = html.escape(str(stock["個股名稱"] or stock["代碼"]))
+    code = html.escape(str(stock["代碼"]))
+    score = stock.get("分數", np.nan)
+    items = stock.get("細項") or []
+    item_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in items[:4]) or "<li>尚無符合加分條件</li>"
+    return f"""
+    <div class="stock-card-title">{title}</div>
+    <div class="stock-card-subtitle">{code}｜基本面評分</div>
+    {_bar_html('基本面分數', score, '依市值、季營收與半年均值等資料累計', 0, 4, '分')}
+    <ul class="metric-note">{item_html}</ul>
+    """
+
+
+@st.dialog("基本面詳細資料")
+def show_financial_detail(stock: dict):
+    st.subheader(f"{stock['個股名稱']} ({stock['代碼']})")
+    st.caption(f"基本面分數：{_format_number(stock.get('分數', np.nan), 1, '分')}")
+    st.markdown("#### 評分細項")
+    details = stock.get("細項") or ["尚無符合加分條件"]
+    for item in details:
+        st.write(f"- {item}")
+
+    source_row = stock.get("source_row", {})
+    if source_row:
+        st.markdown("#### 公司與產業說明")
+        st.write(f"**產業定位：** {source_row.get('產業定位') or '未提供'}")
+        st.write(f"**公司業務說明：** {source_row.get('公司業務說明') or '未提供'}")
+        st.write(f"**在該產業的地位與優勢：** {source_row.get('在該產業的地位與優勢') or '未提供'}")
+
+    detail = fetch_financial_detail(stock["代碼"])
+    fast_info = detail.get("fast_info", {})
+    if fast_info:
+        st.markdown("#### Yahoo Finance 快速資訊")
+        cols = st.columns(3)
+        cols[0].metric("市值", _format_number(fast_info.get("market_cap"), 0))
+        cols[1].metric("最近價格", _format_number(fast_info.get("last_price")))
+        cols[2].metric("年初至今最高", _format_number(fast_info.get("year_high")))
+
+    qf = detail.get("quarterly_financials", pd.DataFrame())
+    if isinstance(qf, pd.DataFrame) and not qf.empty:
+        st.markdown("#### 季度財務資料")
+        st.dataframe(qf, width="stretch")
+
+
+def chip_card_html(stock: dict) -> str:
+    title = html.escape(str(stock.get("個股", stock.get("代碼", ""))))
+    return f"""
+    <div class="stock-card-title">{title}</div>
+    <div class="stock-card-subtitle">買超單位：張｜紅色買超、綠色賣超</div>
+    {_bar_html('外資 5日買超', stock.get('外資_5日', np.nan), '最近5個交易日合計', 0, 10000, '張')}
+    {_bar_html('外資 10日買超', stock.get('外資_10日', np.nan), '最近10個交易日合計', 0, 20000, '張')}
+    {_bar_html('外資 20日買超', stock.get('外資_20日', np.nan), '最近20個交易日合計', 0, 40000, '張')}
+    {_bar_html('投信 5日買超', stock.get('投信_5日', np.nan), '最近5個交易日合計', 0, 3000, '張')}
+    {_bar_html('投信 10日買超', stock.get('投信_10日', np.nan), '最近10個交易日合計', 0, 6000, '張')}
+    {_bar_html('投信 20日買超', stock.get('投信_20日', np.nan), '最近20個交易日合計', 0, 12000, '張')}
+    {_bar_html('自營商 5日買超', stock.get('自營商_5日', np.nan), '最近5個交易日合計', 0, 3000, '張')}
+    {_bar_html('自營商 10日買超', stock.get('自營商_10日', np.nan), '最近10個交易日合計', 0, 6000, '張')}
+    {_bar_html('自營商 20日買超', stock.get('自營商_20日', np.nan), '最近20個交易日合計', 0, 12000, '張')}
+    """
+
+
+def render_card_grid(cards, html_func, cols_per_row: int, button_label=None, button_key_prefix: str = "card", on_click=None):
+    for start in range(0, len(cards), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col, stock in zip(cols, cards[start:start + cols_per_row]):
+            with col:
+                with st.container(border=True):
+                    st.markdown(html_func(stock), unsafe_allow_html=True)
+                    if button_label and on_click:
+                        if st.button(button_label, key=f"{button_key_prefix}_{stock['代碼']}", width="stretch"):
+                            on_click(stock)
 
 
 def tech_score(stock_code: str) -> dict:
@@ -380,7 +500,9 @@ with tab1:
     else:
         st.info("此族群沒有可用股票代碼")
 
+
 with tab2:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
     g2 = st.selectbox("選擇族群（技術面）", all_groups)
     subset = group_df[group_df["族群"] == g2].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
@@ -390,45 +512,55 @@ with tab2:
     with st.spinner("計算技術面評分中..."):
         for code in subset["代碼"].dropna().unique():
             if code:
-                s = tech_score(code)
-                s["個股名稱"] = name_map.get(code, code)
-                results.append(s)
+                score = tech_score(code)
+                score["個股名稱"] = name_map.get(code, code)
+                results.append(score)
     if results:
-        out = pd.DataFrame(results).sort_values("分數", ascending=False)
-        out["個股"] = out["個股名稱"] + " (" + out["代碼"] + ")"
-        st.dataframe(out[["個股", "分數", "細項"]], width="stretch", hide_index=True)
-
-        chosen = st.selectbox("選擇個股查看近一年K線", out["個股"].tolist())
-        selected_code = re.search(r"\((\d{4,6})\)", chosen).group(1)
-        kdf = fetch_ohlcv(selected_code, period="1y")
-        if not kdf.empty:
-            fig = go.Figure(data=[go.Candlestick(x=kdf.index, open=kdf["Open"], high=kdf["High"], low=kdf["Low"], close=kdf["Close"])])
-            fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"{chosen} 近一年K線")
-            st.plotly_chart(fig, width="stretch")
+        cards = pd.DataFrame(results).sort_values("分數", ascending=False).to_dict("records")
+        cols_per_row = st.slider("每列顯示技術面方框數", min_value=2, max_value=4, value=3)
+        render_card_grid(
+            cards,
+            score_card_html,
+            cols_per_row,
+            button_label="顯示K線",
+            button_key_prefix="kline",
+            on_click=lambda stock: show_kline_dialog(stock["個股名稱"], stock["代碼"]),
+        )
     else:
         st.info("此族群沒有可用股票代碼")
 
 with tab3:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
     g3 = st.selectbox("選擇族群（基本面）", all_groups)
     subset = group_df[group_df["族群"] == g3].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
     subset["名稱"] = subset["個股代碼名稱"].apply(_parse_stock_name)
     name_map = dict(zip(subset["代碼"], subset["名稱"]))
+    source_map = {row["代碼"]: row.to_dict() for _, row in subset.iterrows()}
     results = []
     with st.spinner("計算基本面評分中..."):
         for code in subset["代碼"].dropna().unique():
             if code:
-                s = fetch_financial_score(code)
-                s["個股名稱"] = name_map.get(code, code)
-                results.append(s)
+                score = fetch_financial_score(code)
+                score["個股名稱"] = name_map.get(code, code)
+                score["source_row"] = source_map.get(code, {})
+                results.append(score)
     if results:
-        out = pd.DataFrame(results).sort_values("分數", ascending=False)
-        out["個股"] = out["個股名稱"] + " (" + out["代碼"] + ")"
-        st.dataframe(out[["個股", "分數", "細項"]], width="stretch", hide_index=True)
+        cards = pd.DataFrame(results).sort_values("分數", ascending=False).to_dict("records")
+        cols_per_row = st.slider("每列顯示基本面方框數", min_value=2, max_value=4, value=3)
+        render_card_grid(
+            cards,
+            financial_card_html,
+            cols_per_row,
+            button_label="詳細資訊",
+            button_key_prefix="financial_detail",
+            on_click=show_financial_detail,
+        )
     else:
         st.info("此族群沒有可用股票代碼")
 
 with tab4:
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
     st.subheader("籌碼統計：三大法人最近 5 / 10 / 20 日買超")
     st.caption("買超單位為『張』；正值代表買超，負值代表賣超。資料來源使用 FinMind 三大法人買賣表。")
     g4 = st.selectbox("選擇族群（籌碼統計）", all_groups)
@@ -447,25 +579,9 @@ with tab4:
             rows.append(summary)
 
     if rows:
-        out = pd.DataFrame(rows)
-        display_cols = [
-            "個股",
-            "外資_5日", "外資_10日", "外資_20日",
-            "投信_5日", "投信_10日", "投信_20日",
-            "自營商_5日", "自營商_10日", "自營商_20日",
-        ]
-        st.dataframe(
-            out[display_cols].style.format({c: "{:,.0f}" for c in display_cols if c != "個股"}),
-            width="stretch",
-            hide_index=True,
-        )
-
-        chart_df = out.melt(id_vars="個股", value_vars=[c for c in display_cols if c != "個股"], var_name="法人_天期", value_name="買超張數")
-        fig = go.Figure()
-        for stock_name, stock_df in chart_df.groupby("個股"):
-            fig.add_trace(go.Bar(x=stock_df["法人_天期"], y=stock_df["買超張數"], name=stock_name))
-        fig.update_layout(height=480, barmode="group", title="三大法人買超統計（張）", xaxis_title="法人與天期", yaxis_title="買超張數")
-        st.plotly_chart(fig, width="stretch")
+        cards = pd.DataFrame(rows).to_dict("records")
+        cols_per_row = st.slider("每列顯示籌碼方框數", min_value=1, max_value=3, value=2)
+        render_card_grid(cards, chip_card_html, cols_per_row)
     else:
         st.info("此族群沒有可用股票代碼")
 
