@@ -337,6 +337,38 @@ def render_card_grid(cards, html_func, cols_per_row: int, button_label=None, but
                             on_click(stock)
 
 
+def show_tech_score_explanation():
+    with st.expander("技術面評分說明", expanded=True):
+        st.markdown(
+            """
+            **最高 6 分。** 分數越高代表近期技術條件越多同時成立，僅作為排序與觀察輔助。
+
+            | 條件 | 加分 |
+            |---|---:|
+            | MACD 由下往上穿越訊號線（黃金交叉） | +2 |
+            | 最新收盤價站上 20 日均線 | +1 |
+            | 最新收盤價站上 60 日均線 | +1 |
+            | 最新成交量大於前 4 個交易日均量的 1.5 倍 | +1 |
+            | 最新收盤價高於約 1 個月前（22 個交易日前） | +1 |
+            """
+        )
+
+
+def show_financial_score_explanation():
+    with st.expander("基本面評分說明", expanded=True):
+        st.markdown(
+            """
+            **最高 4 分。** 分數越高代表目前可取得的基本面與股價相對強度條件越多同時成立。
+
+            | 條件 | 加分 |
+            |---|---:|
+            | Yahoo Finance 可取得有效市值資料 | +1 |
+            | 最新季度營收高於前一季營收 | +2 |
+            | 最新收盤價高於近半年均值（120 日均線，至少 20 筆資料） | +1 |
+            """
+        )
+
+
 def tech_score(stock_code: str) -> dict:
     df = fetch_ohlcv(stock_code, period="1y")
     base = {"代碼": stock_code, "分數": 0.0, "細項": []}
@@ -503,6 +535,7 @@ with tab1:
 
 with tab2:
     st.markdown(CARD_CSS, unsafe_allow_html=True)
+    show_tech_score_explanation()
     g2 = st.selectbox("選擇族群（技術面）", all_groups)
     subset = group_df[group_df["族群"] == g2].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
@@ -531,6 +564,7 @@ with tab2:
 
 with tab3:
     st.markdown(CARD_CSS, unsafe_allow_html=True)
+    show_financial_score_explanation()
     g3 = st.selectbox("選擇族群（基本面）", all_groups)
     subset = group_df[group_df["族群"] == g3].copy()
     subset["代碼"] = subset["個股代碼名稱"].apply(_parse_stock_code)
