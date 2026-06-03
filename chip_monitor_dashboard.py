@@ -1,4 +1,5 @@
 import html
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,8 +11,8 @@ import streamlit as st
 import yfinance as yf
 from FinMind.data import DataLoader
 
-st.set_page_config(page_title="台股族群監控", page_icon="📊", layout="wide")
-st.title("📊 台股族群監控 App")
+st.set_page_config(page_title="🐿️", page_icon="🐿️", layout="wide")
+st.title("🐿️")
 
 CSV_PATH = Path("Group.csv")
 
@@ -85,6 +86,30 @@ def fetch_ohlcv(stock_code: str, period: str = "6mo") -> pd.DataFrame:
         except Exception:
             continue
     return pd.DataFrame()
+
+
+def finmind_token() -> str:
+    token = os.environ.get("FINMIND_API_TOKEN", "")
+    try:
+        return st.secrets.get("FINMIND_API_TOKEN", token)
+    except Exception:
+        return token
+
+
+def create_finmind_loader() -> DataLoader:
+    return DataLoader(token=finmind_token())
+
+
+@st.cache_data(ttl=1800)
+def fetch_finmind_financial_statement(stock_code: str) -> pd.DataFrame:
+    try:
+        api = create_finmind_loader()
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+        data = api.taiwan_stock_financial_statement(stock_id=stock_code, start_date=start_date, end_date=end_date)
+        return data if isinstance(data, pd.DataFrame) else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
 def latest_price_change(stock_code: str):
@@ -246,17 +271,21 @@ def score_card_html(stock: dict) -> str:
 
 @st.cache_data(ttl=900)
 def fetch_financial_detail(stock_code: str) -> dict:
-    detail = {"fast_info": {}, "quarterly_financials": pd.DataFrame(), "major_holders": pd.DataFrame()}
+    detail = {"source": "無資料", "fast_info": {}, "quarterly_financials": pd.DataFrame(), "finmind_financial_statement": pd.DataFrame()}
+    finmind_df = fetch_finmind_financial_statement(stock_code)
+    if not finmind_df.empty:
+        detail["source"] = "FinMind"
+        detail["finmind_financial_statement"] = finmind_df
+        return detail
+
     for suffix in [".TW", ".TWO"]:
         try:
             ticker = yf.Ticker(f"{stock_code}{suffix}")
+            detail["source"] = "Yahoo Finance"
             detail["fast_info"] = dict(ticker.fast_info or {})
             qf = ticker.quarterly_financials
             if isinstance(qf, pd.DataFrame):
                 detail["quarterly_financials"] = qf
-            holders = ticker.major_holders
-            if isinstance(holders, pd.DataFrame):
-                detail["major_holders"] = holders
             return detail
         except Exception:
             continue
@@ -271,8 +300,8 @@ def financial_card_html(stock: dict) -> str:
     item_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in items[:4]) or "<li>尚無符合加分條件</li>"
     return f"""
     <div class="stock-card-title">{title}</div>
-    <div class="stock-card-subtitle">{code}｜基本面評分</div>
-    {_bar_html('基本面分數', score, '依市值、季營收與半年均值等資料累計', 0, 4, '分')}
+    <div class="stock-card-subtitle">{code}｜基本面評分｜資料來源：{html.escape(str(stock.get("資料來源", "未取得")))}</div>
+    {_bar_html('基本面分數', score, '優先依 FinMind 財報，無資料時使用 Yahoo Finance 備援', 0, 4, '分')}
     <ul class="metric-note">{item_html}</ul>
     """
 
@@ -294,6 +323,13 @@ def show_financial_detail(stock: dict):
         st.write(f"**在該產業的地位與優勢：** {source_row.get('在該產業的地位與優勢') or '未提供'}")
 
     detail = fetch_financial_detail(stock["代碼"])
+    st.markdown(f"#### 資料來源：{detail.get('source', stock.get('資料來源', '未取得'))}")
+    finmind_df = detail.get("finmind_financial_statement", pd.DataFrame())
+    if isinstance(finmind_df, pd.DataFrame) and not finmind_df.empty:
+        st.markdown("#### FinMind 綜合損益表")
+        st.dataframe(finmind_df.sort_values("date", ascending=False), width="stretch")
+        return
+
     fast_info = detail.get("fast_info", {})
     if fast_info:
         st.markdown("#### Yahoo Finance 快速資訊")
@@ -304,7 +340,7 @@ def show_financial_detail(stock: dict):
 
     qf = detail.get("quarterly_financials", pd.DataFrame())
     if isinstance(qf, pd.DataFrame) and not qf.empty:
-        st.markdown("#### 季度財務資料")
+        st.markdown("#### Yahoo Finance 季度財務資料")
         st.dataframe(qf, width="stretch")
 
 
@@ -349,7 +385,7 @@ def show_tech_score_explanation():
             | 最新收盤價站上 20 日均線 | +1 |
             | 最新收盤價站上 60 日均線 | +1 |
             | 最新成交量大於前 4 個交易日均量的 1.5 倍 | +1 |
-            | 最新收盤價高於約 1 個月前（22 個交易日前） | +1 |
+            | 最新收盤價高於 5 日均線 | +1 |
             """
         )
 
@@ -358,13 +394,16 @@ def show_financial_score_explanation():
     with st.expander("基本面評分說明", expanded=True):
         st.markdown(
             """
-            **最高 4 分。** 分數越高代表目前可取得的基本面與股價相對強度條件越多同時成立。
+            **最高 4 分。** 系統會優先使用 FinMind 綜合損益表；若 FinMind 無資料才改用 Yahoo Finance。
 
-            | 條件 | 加分 |
-            |---|---:|
-            | Yahoo Finance 可取得有效市值資料 | +1 |
-            | 最新季度營收高於前一季營收 | +2 |
-            | 最新收盤價高於近半年均值（120 日均線，至少 20 筆資料） | +1 |
+            | 資料來源 | 條件 | 加分 |
+            |---|---|---:|
+            | FinMind | 最新季度營收高於前一季營收 | +2 |
+            | FinMind | 最新季度淨利/損益為正 | +1 |
+            | FinMind | 最新季度 EPS / 每股盈餘為正 | +1 |
+            | Yahoo Finance（備援） | 可取得有效市值資料 | +1 |
+            | Yahoo Finance（備援） | 最新季度營收高於前一季營收 | +2 |
+            | Yahoo Finance（備援） | 最新收盤價高於近半年均值（120 日均線，至少 20 筆資料） | +1 |
             """
         )
 
@@ -393,21 +432,64 @@ def tech_score(stock_code: str) -> dict:
     if len(vol) >= 5 and vol.iloc[-1] > vol.iloc[-5:-1].mean() * 1.5:
         base["分數"] += 1
         base["細項"].append("量能放大 +1")
-    if len(close) >= 22 and close.iloc[-1] > close.iloc[-22]:
+    if close.iloc[-1] > close.rolling(5).mean().iloc[-1]:
         base["分數"] += 1
-        base["細項"].append("近一月趨勢向上 +1")
+        base["細項"].append("站上5日均線 +1")
     return base
 
 
+def _latest_finmind_values(df: pd.DataFrame, keywords) -> pd.Series:
+    if df.empty or "type" not in df.columns or "value" not in df.columns:
+        return pd.Series(dtype="float64")
+    pattern = "|".join(re.escape(k) for k in keywords)
+    matched = df[df["type"].astype(str).str.contains(pattern, case=False, na=False)].copy()
+    if matched.empty:
+        return pd.Series(dtype="float64")
+    matched["date"] = pd.to_datetime(matched["date"], errors="coerce")
+    matched["value"] = pd.to_numeric(matched["value"], errors="coerce")
+    return matched.dropna(subset=["date", "value"]).sort_values("date", ascending=False)["value"]
+
+
+def _score_with_finmind(stock_code: str) -> dict:
+    out = {"代碼": stock_code, "分數": 0.0, "細項": [], "資料來源": "FinMind"}
+    finmind_df = fetch_finmind_financial_statement(stock_code)
+    if finmind_df.empty:
+        out["資料來源"] = "FinMind 無資料"
+        return out
+
+    revenue = _latest_finmind_values(finmind_df, ["Revenue", "營業收入", "營收", "收入"])
+    if len(revenue) >= 2 and revenue.iloc[0] > revenue.iloc[1]:
+        out["分數"] += 2
+        out["細項"].append("FinMind：最新季營收成長 +2")
+
+    net_income = _latest_finmind_values(finmind_df, ["NetIncome", "ProfitLoss", "本期淨利", "稅後淨利", "淨利", "損益"])
+    if len(net_income) >= 1 and net_income.iloc[0] > 0:
+        out["分數"] += 1
+        out["細項"].append("FinMind：最新季淨利為正 +1")
+
+    eps = _latest_finmind_values(finmind_df, ["EPS", "每股盈餘"])
+    if len(eps) >= 1 and eps.iloc[0] > 0:
+        out["分數"] += 1
+        out["細項"].append("FinMind：最新季 EPS 為正 +1")
+
+    if not out["細項"]:
+        out["細項"].append("FinMind：已取得財報，但未符合加分條件")
+    return out
+
+
 def fetch_financial_score(stock_code: str) -> dict:
-    out = {"代碼": stock_code, "分數": 0.0, "細項": []}
+    finmind_score = _score_with_finmind(stock_code)
+    if finmind_score["資料來源"] == "FinMind":
+        return finmind_score
+
+    out = {"代碼": stock_code, "分數": 0.0, "細項": [], "資料來源": "Yahoo Finance"}
     for suffix in [".TW", ".TWO"]:
         try:
             t = yf.Ticker(f"{stock_code}{suffix}")
             info = t.fast_info or {}
             if info.get("market_cap") and info["market_cap"] > 0:
                 out["分數"] += 1
-                out["細項"].append("市值資料有效 +1")
+                out["細項"].append("Yahoo Finance：市值資料有效 +1")
 
             qf = t.quarterly_financials
             if isinstance(qf, pd.DataFrame) and not qf.empty:
@@ -416,17 +498,74 @@ def fetch_financial_score(stock_code: str) -> dict:
                     rev = qf.loc[rev_key].dropna().astype(float)
                     if len(rev) >= 2 and rev.iloc[0] > rev.iloc[1]:
                         out["分數"] += 2
-                        out["細項"].append("最新季營收成長 +2")
+                        out["細項"].append("Yahoo Finance：最新季營收成長 +2")
             close = fetch_ohlcv(stock_code, period="6mo")
             if not close.empty:
                 c = close["Close"].astype(float)
                 if c.iloc[-1] > c.rolling(120, min_periods=20).mean().iloc[-1]:
                     out["分數"] += 1
-                    out["細項"].append("股價強於半年均值 +1")
+                    out["細項"].append("Yahoo Finance：股價強於半年均值 +1")
+            if not out["細項"]:
+                out["細項"].append("Yahoo Finance：已取得資料，但未符合加分條件")
             return out
         except Exception:
             continue
-    return out
+    finmind_score["資料來源"] = "未取得"
+    finmind_score["細項"] = ["FinMind 與 Yahoo Finance 皆無法取得基本面資料"]
+    return finmind_score
+
+
+def _institution_bucket(name: str) -> str:
+    text = str(name)
+    if "投信" in text or "Investment_Trust" in text:
+        return "投信"
+    if "自營" in text or "Dealer" in text:
+        return "自營商"
+    if "外資" in text or "Foreign" in text:
+        return "外資"
+    return "其他"
+
+
+@st.cache_data(ttl=1800)
+def fetch_institutional_summary(stock_code: str, end_date: str) -> dict:
+    start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=120)).strftime("%Y-%m-%d")
+    base = {
+        "代碼": stock_code,
+        "外資_5日": np.nan,
+        "外資_10日": np.nan,
+        "外資_20日": np.nan,
+        "投信_5日": np.nan,
+        "投信_10日": np.nan,
+        "投信_20日": np.nan,
+        "自營商_5日": np.nan,
+        "自營商_10日": np.nan,
+        "自營商_20日": np.nan,
+    }
+    try:
+        api = create_finmind_loader()
+        df = api.taiwan_stock_institutional_investors(stock_id=stock_code, start_date=start_date, end_date=end_date)
+    except Exception:
+        return base
+
+    if df is None or df.empty:
+        return base
+
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["bucket"] = df["name"].apply(_institution_bucket)
+    df["net"] = pd.to_numeric(df["buy"], errors="coerce").fillna(0) - pd.to_numeric(df["sell"], errors="coerce").fillna(0)
+    grouped = df[df["bucket"].isin(["外資", "投信", "自營商"])].groupby(["date", "bucket"], as_index=False)["net"].sum()
+    trade_dates = sorted(grouped["date"].unique())
+    if not trade_dates:
+        return base
+
+    for bucket in ["外資", "投信", "自營商"]:
+        bucket_df = grouped[grouped["bucket"] == bucket]
+        for days in [5, 10, 20]:
+            recent_dates = trade_dates[-days:]
+            total_shares = bucket_df[bucket_df["date"].isin(recent_dates)]["net"].sum()
+            base[f"{bucket}_{days}日"] = total_shares / 1000
+    return base
 
 
 def _institution_bucket(name: str) -> str:
