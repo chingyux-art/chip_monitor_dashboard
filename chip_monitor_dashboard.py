@@ -10,8 +10,10 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from FinMind.data import DataLoader
+from pathlib import Path
 
-st.set_page_config(page_title="Chip Monitor Dashboard", page_icon="icon.jpg", layout="wide")
+icon_path = Path("icon.jpg")
+st.set_page_config(page_title="Chip Monitor Dashboard", page_icon=str(icon_path), layout="wide")
 
 CSV_PATH = Path("Group.csv")
 WATCHLIST_PATH = Path("Watchlist.csv")
